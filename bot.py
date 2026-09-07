@@ -94,24 +94,22 @@ def quick_bd_relevance_check(title, summary, is_international):
     return True
 
 def get_live_groq_models():
-    """Dynamically fetches models active on your specific Groq key."""
     if not groq_client:
         return []
     try:
         available = [m.id for m in groq_client.models.list().data if "whisper" not in m.id.lower() and "guard" not in m.id.lower()]
-        # Prioritize text models
-        priority = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.6-27b", "openai/gpt-oss-20b"]
+        priority = ["qwen/qwen3.6-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
         sorted_models = [m for m in priority if m in available] + [m for m in available if m not in priority]
         return sorted_models
     except Exception as e:
-        print(f"Could not list Groq models: {e}")
+        print(f"Could not list Groq models: {e}", flush=True)
         return []
 
 ACTIVE_GROQ_MODELS = get_live_groq_models()
-print(f"Active Groq models detected: {ACTIVE_GROQ_MODELS[:4]}")
+print(f"Active Groq models detected: {ACTIVE_GROQ_MODELS[:4]}", flush=True)
 
 def query_llm_dual_engine(prompt):
-    # 1. Primary: Groq Active Models
+    # 1. Groq
     if groq_client and ACTIVE_GROQ_MODELS:
         for model in ACTIVE_GROQ_MODELS[:3]:
             try:
@@ -119,16 +117,16 @@ def query_llm_dual_engine(prompt):
                     messages=[{"role": "user", "content": prompt}],
                     model=model,
                     temperature=0.3,
-                    max_tokens=250,
+                    max_tokens=300,
                 )
                 text = res.choices[0].message.content.strip()
                 text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
                 if len(text) > 20:
                     return text
             except Exception as ge:
-                print(f"Groq {model} error: {ge}")
+                print(f"Groq {model} error: {ge}", flush=True)
 
-    # 2. Fallback: Gemini with automatic retry on 429
+    # 2. Gemini fallback
     if gemini_client:
         for model in ["gemini-3.6-flash", "gemini-3.5-flash"]:
             for attempt in range(2):
@@ -146,10 +144,10 @@ def query_llm_dual_engine(prompt):
                         m = re.search(r"retry in (\d+)", err_msg)
                         if m:
                             wait_sec = int(m.group(1)) + 1
-                        print(f"Gemini quota cooldown: waiting {wait_sec}s...")
+                        print(f"Gemini cooldown: waiting {wait_sec}s...", flush=True)
                         time.sleep(wait_sec)
                     else:
-                        print(f"Gemini {model} error: {gme}")
+                        print(f"Gemini {model} error: {gme}", flush=True)
                         break
 
     return None
@@ -165,20 +163,18 @@ Title: {clean_t}
 Summary: {clean_s}
 
 Requirements:
-1. BANGLADESH RELEVANCE:
-   - Does this directly involve Bangladesh? If purely international with zero connection, output RELEVANT: NO. Else RELEVANT: YES.
-2. ENGAGEMENT SCORE (1 to 10):
-   - Rate public curiosity, debate, talking points, or viral potential in Bangladesh.
-3. IS_POLITICS: YES or NO.
-4. COPYWRITING (Always 100% fluent Bengali):
+1. BANGLADESH RELEVANCE: Is this news relevant to Bangladesh? Output YES or NO.
+2. ENGAGEMENT SCORE: Rate public curiosity, debate, or viral reach from 1 to 10.
+3. IS_POLITICS: Is it about Bangladesh politics, government, elections, or court/law? Output YES or NO.
+4. COPYWRITING (Always 100% natural, fluent Bengali):
    - HEADLINE: Catchy, powerful Bengali headline (max 10-14 words).
    - SUB_HEADLINE: Contextual Bengali sub-headline (or 'None').
-   - SUMMARY: Exactly 2 crisp sentences in journalistic Bengali.
+   - SUMMARY: Exactly 2 clear journalistic sentences in Bengali.
 
-Format EXACTLY like this:
-RELEVANT: YES or NO
+Format your answer with these labels:
+RELEVANT: YES
 IS_POLITICS: YES or NO
-ENGAGEMENT_SCORE: <integer 1 to 10>
+ENGAGEMENT_SCORE: 8
 HEADLINE: <bengali headline>
 SUB_HEADLINE: <bengali sub-headline or None>
 SUMMARY: <bengali summary>"""
@@ -188,28 +184,42 @@ SUMMARY: <bengali summary>"""
         return None
 
     try:
-        is_rel = "YES" in re.findall(r"RELEVANT:\s*(YES|NO)", response_text, re.IGNORECASE)
-        if not is_rel:
-            return None
+        # Robust label parsing
+        clean_resp = re.sub(r"[*#_`]", "", response_text)
+        
+        is_intl = any(k in source_name.lower() for k in ["bbc world", "reuters", "ap news", "al jazeera"])
+        is_rel = True
+        if is_intl:
+            rel_m = re.search(r"RELEVANT:\s*(YES|NO)", clean_resp, re.IGNORECASE)
+            if rel_m and "NO" in rel_m.group(1).upper():
+                return None
 
-        is_pol = "YES" in re.findall(r"IS_POLITICS:\s*(YES|NO)", response_text, re.IGNORECASE)
-        score_match = re.search(r"ENGAGEMENT_SCORE:\s*(\d+)", response_text)
-        score = int(score_match.group(1)) if score_match else 5
+        pol_m = re.search(r"IS_POLITICS:\s*(YES|NO)", clean_resp, re.IGNORECASE)
+        is_pol = bool(pol_m and "YES" in pol_m.group(1).upper())
+        if not is_pol:
+            is_pol = any(k in (clean_t + " " + clean_s).lower() for k in POLITICS_KEYWORDS)
+
+        score_match = re.search(r"ENGAGEMENT_SCORE:\s*(\d+)", clean_resp, re.IGNORECASE)
+        score = int(score_match.group(1)) if score_match else 6
 
         headline = clean_t
         sub_headline = ""
         summary = clean_s
 
-        for line in response_text.split("\n"):
+        for line in clean_resp.split("\n"):
             line = line.strip()
-            if line.startswith("HEADLINE:"):
-                headline = line.replace("HEADLINE:", "").strip().replace('"', '')
-            elif line.startswith("SUB_HEADLINE:"):
-                sub = line.replace("SUB_HEADLINE:", "").strip().replace('"', '')
+            if re.match(r"^HEADLINE:\s*", line, re.IGNORECASE):
+                hl = re.sub(r"^HEADLINE:\s*", "", line, flags=re.IGNORECASE).strip(' "')
+                if len(hl) > 5:
+                    headline = hl
+            elif re.match(r"^SUB_HEADLINE:\s*", line, re.IGNORECASE):
+                sub = re.sub(r"^SUB_HEADLINE:\s*", "", line, flags=re.IGNORECASE).strip(' "')
                 if sub.lower() != "none" and len(sub) > 3:
                     sub_headline = sub
-            elif line.startswith("SUMMARY:"):
-                summary = line.replace("SUMMARY:", "").strip().replace('"', '')
+            elif re.match(r"^SUMMARY:\s*", line, re.IGNORECASE):
+                sm = re.sub(r"^SUMMARY:\s*", "", line, flags=re.IGNORECASE).strip(' "')
+                if len(sm) > 10:
+                    summary = sm
 
         return {
             "headline": headline,
@@ -219,7 +229,7 @@ SUMMARY: <bengali summary>"""
             "score": score
         }
     except Exception as e:
-        print(f"Parsing error: {e}")
+        print(f"Parsing error: {e}", flush=True)
         return None
 
 def clean_and_maximize_image_url(url):
@@ -345,29 +355,33 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     top_h = int(height * 0.60)
     card = Image.new("RGB", (width, height), color="#4c0000")
 
-    # 1. TOP 60% IMAGE WITH GAUSSIAN BLUR FILLER
+    # Top 60% with Gaussian blur filler
+    rendered_image = False
     try:
         resp = requests.get(image_url, timeout=12, headers=BROWSER_HEADERS)
-        raw_img = Image.open(BytesIO(resp.content)).convert("RGB")
-        
-        bg_blur = raw_img.resize((width, top_h), Image.Resampling.BILINEAR)
-        bg_blur = bg_blur.filter(ImageFilter.GaussianBlur(radius=35))
+        if resp.status_code == 200:
+            raw_img = Image.open(BytesIO(resp.content)).convert("RGB")
+            bg_blur = raw_img.resize((width, top_h), Image.Resampling.BILINEAR)
+            bg_blur = bg_blur.filter(ImageFilter.GaussianBlur(radius=35))
 
-        scale = min(width / raw_img.width, top_h / raw_img.height)
-        new_w = int(raw_img.width * scale)
-        new_h = int(raw_img.height * scale)
-        fit_img = raw_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            scale = min(width / raw_img.width, top_h / raw_img.height)
+            new_w = max(1, int(raw_img.width * scale))
+            new_h = max(1, int(raw_img.height * scale))
+            fit_img = raw_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-        paste_x = (width - new_w) // 2
-        paste_y = (top_h - new_h) // 2
-        bg_blur.paste(fit_img, (paste_x, paste_y))
-        card.paste(bg_blur, (0, 0))
+            paste_x = (width - new_w) // 2
+            paste_y = (top_h - new_h) // 2
+            bg_blur.paste(fit_img, (paste_x, paste_y))
+            card.paste(bg_blur, (0, 0))
+            rendered_image = True
     except Exception as img_err:
-        print(f"Photo render error: {img_err}. Using ambient color gradient.")
+        print(f"Image render fallback note: {img_err}", flush=True)
+
+    if not rendered_image:
         fallback_top = Image.new("RGB", (width, top_h), color="#2d0000")
         card.paste(fallback_top, (0, 0))
 
-    # 2. HEADER LOGO
+    # Header Logo
     header_path = get_asset("header_logo")
     if header_path:
         try:
@@ -379,7 +393,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         except Exception:
             pass
 
-    # 3. FLOATING CHAT BUBBLE
+    # Floating Chat Bubble
     bubble_w = 880
     bubble_h = 490 if is_square else 560
     bubble_x = (width - bubble_w) // 2
@@ -392,6 +406,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     tail = [(bubble_w - 140, bubble_h - tail_h), (bubble_w - 40, bubble_h), (bubble_w - 40, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
+    # Watermark: #4c0000 with 20% opacity
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
@@ -405,8 +420,8 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             wm_x = (bubble_w - wm_size) // 2
             wm_y = (bubble_h - tail_h - wm_size) // 2
             bubble_img.paste(tinted_wm, (wm_x, wm_y), mask=tinted_wm)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Watermark paste error: {e}", flush=True)
 
     font_hl = get_font(42 if not is_square else 36)
     font_sub = get_font(30 if not is_square else 26)
@@ -416,6 +431,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     text_y = 35
     inner_w = bubble_w - (text_pad_x * 2)
 
+    # Headline in bold maroon #4c0000
     hl_lines = wrap_text(headline, font_hl, inner_w, b_draw)
     for line in hl_lines[:3]:
         bbox = b_draw.textbbox((0, 0), line, font=font_hl)
@@ -423,6 +439,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_hl)
         text_y += (bbox[3] - bbox[0]) + 14
 
+    # Sub-headline in bold maroon #4c0000
     if sub_headline:
         text_y += 6
         sub_lines = wrap_text(sub_headline, font_sub, inner_w, b_draw)
@@ -432,6 +449,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_sub)
             text_y += (bbox[3] - bbox[0]) + 10
 
+    # Summary in bold Pure Black #000000
     text_y += 15
     sum_lines = wrap_text(summary, font_sum, inner_w, b_draw)
     for line in sum_lines[:4]:
@@ -442,6 +460,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 
     card.paste(bubble_img, (bubble_x, bubble_y), mask=bubble_img)
 
+    # Footer: Date & Source
     draw = ImageDraw.Draw(card)
     font_footer = get_font(25)
     date_str = datetime.utcnow().strftime("%d %B").upper()
@@ -501,7 +520,7 @@ def post_facebook_feed(image_path, caption):
     payload = {"caption": caption, "published": "true", "access_token": ACCESS_TOKEN}
     with open(image_path, "rb") as f:
         res = requests.post(url, files={"source": f}, data=payload).json()
-        print("FB Feed response:", res)
+        print("FB Feed response:", res, flush=True)
         return res
 
 def post_facebook_comment(target_id, message):
@@ -509,10 +528,10 @@ def post_facebook_comment(target_id, message):
     payload = {"message": message, "access_token": ACCESS_TOKEN}
     try:
         res = requests.post(url, data=payload, timeout=15).json()
-        print("FB Comment response:", res)
+        print("FB Comment response:", res, flush=True)
         return res
     except Exception as e:
-        print(f"FB Comment error: {e}")
+        print(f"FB Comment error: {e}", flush=True)
         return None
 
 def post_facebook_story(image_path):
@@ -548,7 +567,7 @@ def post_instagram_feed(image_url, caption):
     if wait_for_ig_container(creation_id):
         pub_url = f"https://graph.facebook.com/v20.0/{IG_USER_ID}/media_publish"
         pub_res = requests.post(pub_url, data={"creation_id": creation_id, "access_token": ACCESS_TOKEN}).json()
-        print("IG Feed published:", pub_res)
+        print("IG Feed published:", pub_res, flush=True)
         return pub_res.get("id")
     return None
 
@@ -570,13 +589,9 @@ def publish_article(entry, source_name, img_url, curated):
     sub_headline = curated["sub_headline"]
     summary = curated["summary"]
     
-    print(f"Publishing article (Score {curated.get('score')}): {headline}")
+    print(f"Publishing article (Score {curated.get('score')}): {headline}", flush=True)
     
     fb_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=False)
-    if not fb_card_path:
-        print("Failed to create FB card path.")
-        return False
-        
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
     
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
@@ -591,7 +606,7 @@ def publish_article(entry, source_name, img_url, curated):
     try:
         post_facebook_story(fb_card_path)
     except Exception as err:
-        print(f"FB Story bypass: {err}")
+        print(f"FB Story bypass: {err}", flush=True)
 
     if IG_USER_ID:
         try:
@@ -617,12 +632,12 @@ def publish_article(entry, source_name, img_url, curated):
             if story_cdn:
                 post_instagram_story(story_cdn)
         except Exception as err:
-            print(f"Instagram posting error: {err}")
+            print(f"Instagram posting error: {err}", flush=True)
 
     return True
 
 def scan_feeds_smart(state):
-    print(f"Smart-scanning {len(ALL_FEEDS)} media feeds with Dual-AI engine...")
+    print(f"Smart-scanning {len(ALL_FEEDS)} media feeds with Dual-AI engine...", flush=True)
     qualifying_candidates = []
     prefiltered_entries = []
 
@@ -655,7 +670,7 @@ def scan_feeds_smart(state):
         except Exception:
             continue
 
-    print(f"Pre-filter kept {len(prefiltered_entries)} high-probability stories. Analyzing with Dual-AI...")
+    print(f"Pre-filter kept {len(prefiltered_entries)} high-probability stories. Analyzing with Dual-AI...", flush=True)
 
     pol_candidates = [e for e in prefiltered_entries if e["is_pol_hint"]]
     gen_candidates = [e for e in prefiltered_entries if not e["is_pol_hint"]]
@@ -674,7 +689,7 @@ def scan_feeds_smart(state):
                 "is_politics": curated["is_politics"],
                 "score": curated["score"]
             })
-            print(f"Accepted: {curated['headline']} (Score: {curated['score']}, Politics: {curated['is_politics']})")
+            print(f"Accepted: {curated['headline']} (Score: {curated['score']}, Politics: {curated['is_politics']})", flush=True)
         time.sleep(2)
 
     qualifying_candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -685,7 +700,7 @@ def main():
     candidates = scan_feeds_smart(state)
 
     if not candidates:
-        print("No qualifying Bangladesh articles evaluated in this run.")
+        print("No qualifying Bangladesh articles evaluated in this run.", flush=True)
         return
 
     published_count = 0
@@ -695,7 +710,7 @@ def main():
     pol_picks = [c for c in candidates if c["is_politics"]]
     if pol_picks:
         chosen_pol = pol_picks[0]
-        print("Publishing Slot 1 (Politics)...")
+        print("Publishing Slot 1 (Politics)...", flush=True)
         if publish_article(chosen_pol["entry"], chosen_pol["source_name"], chosen_pol["img_url"], chosen_pol["curated"]):
             state["posted_urls"].append(chosen_pol["entry"].link)
             selected_links.add(chosen_pol["entry"].link)
@@ -704,7 +719,7 @@ def main():
             time.sleep(20)
 
     # Slots 2 & 3: High-Engagement Stories
-    print("Publishing General / Viral News...")
+    print("Publishing General / Viral News...", flush=True)
     for c in candidates:
         if published_count >= 3:
             break
@@ -718,7 +733,7 @@ def main():
             published_count += 1
             time.sleep(20)
 
-    print(f"Cycle completed. Articles published: {published_count}")
+    print(f"Cycle completed. Articles published: {published_count}", flush=True)
 
 if __name__ == "__main__":
     main()
