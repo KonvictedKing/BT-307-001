@@ -1,0 +1,704 @@
+import os
+import re
+import json
+import time
+import urllib.parse
+from datetime import datetime
+from io import BytesIO
+
+import feedparser
+import requests
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from google import genai
+
+PAGE_ID = os.environ.get("FB_PAGE_ID")
+IG_USER_ID = os.environ.get("IG_USER_ID")
+ACCESS_TOKEN = os.environ.get("FB_ACCESS_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+# MASTER NEWS DIRECTORY: BANGLADESH & GLOBAL OUTLETS
+ALL_FEEDS = [
+    # --- Top Daily Bangla Newspapers ---
+    {"name": "Prothom Alo", "url": "https://www.prothomalo.com/feed"},
+    {"name": "Samakal", "url": "https://www.samakal.com/feed"},
+    {"name": "Kaler Kantho", "url": "https://www.kalerkantho.com/rss.xml"},
+    {"name": "Daily Ittefaq", "url": "https://www.ittefaq.com.bd/rss.xml"},
+    {"name": "Daily Jugantor", "url": "https://www.jugantor.com/feed"},
+    {"name": "Daily Inqilab", "url": "https://dailyinqilab.com/feed"},
+    {"name": "Daily Manab Zamin", "url": "https://mzamin.com/feed"},
+    {"name": "Daily Naya Diganta", "url": "https://www.dailynayadiganta.com/feed"},
+    {"name": "Daily Janakantha", "url": "https://www.dailyjanakantha.com/feed"},
+    {"name": "Bhorer Kagoj", "url": "https://www.bhorerkagoj.com/feed"},
+    {"name": "Desh Rupantor", "url": "https://www.deshrupantor.com/feed"},
+    {"name": "Kalbela", "url": "https://www.kalbela.com/feed"},
+    {"name": "Dainik Amader Shomoy", "url": "https://www.dainikamadershomoy.com/feed"},
+    {"name": "Jaijaidin", "url": "https://www.jaijaidinbd.com/feed"},
+
+    # --- Major Online Portals ---
+    {"name": "BDNews24", "url": "https://bangla.bdnews24.com/rss.xml"},
+    {"name": "Banglanews24", "url": "https://www.banglanews24.com/rss/rss.xml"},
+    {"name": "Jago News", "url": "https://www.jagonews24.com/rss/rss.xml"},
+    {"name": "Dhaka Post", "url": "https://www.dhakapost.com/rss.xml"},
+    {"name": "Risingbd", "url": "https://www.risingbd.com/rss/rss.xml"},
+
+    # --- TV & Broadcast Media ---
+    {"name": "BBC Bangla", "url": "https://feeds.bbci.co.uk/bengali/rss.xml"},
+    {"name": "Somoy TV", "url": "https://www.somoynews.tv/rss.xml"},
+    {"name": "Channel 24", "url": "https://www.channel24bd.tv/rss.xml"},
+    {"name": "Jamuna TV", "url": "https://www.jamuna.tv/feed"},
+    {"name": "Ekattor TV", "url": "https://ekattor.tv/feed"},
+    {"name": "NTV Online", "url": "https://www.ntvbd.com/feed"},
+    {"name": "RTV Online", "url": "https://www.rtvonline.com/feed"},
+
+    # --- English & Business Dailies ---
+    {"name": "The Daily Star", "url": "https://www.thedailystar.net/frontpage/rss.xml"},
+    {"name": "Dhaka Tribune", "url": "https://www.dhakatribune.com/feed"},
+    {"name": "The Business Standard", "url": "https://www.tbsnews.net/rss.xml"},
+    {"name": "Financial Express", "url": "https://thefinancialexpress.com.bd/feed"},
+    {"name": "Daily Sun", "url": "https://www.daily-sun.com/feed"},
+    {"name": "New Age", "url": "https://www.newagebd.net/feed"},
+
+    # --- Leading International Networks (Monitored for Bangladesh Coverage) ---
+    {"name": "BBC World", "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
+    {"name": "Reuters", "url": "https://feedx.net/rss/reuters.xml"},
+    {"name": "AP News", "url": "https://feedx.net/rss/apnews.xml"},
+    {"name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+    {"name": "CNN", "url": "http://rss.cnn.com/rss/edition.rss"},
+    {"name": "The Guardian", "url": "https://www.theguardian.com/world/rss"},
+    {"name": "The New York Times", "url": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"},
+    {"name": "Bloomberg", "url": "https://feeds.bloomberg.com/politics/news.rss"}
+]
+
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "bn,en-US;q=0.9,en;q=0.8"
+}
+
+def load_state():
+    state = {"posted_urls": []}
+    if os.path.exists("posted_urls.json"):
+        try:
+            with open("posted_urls.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    state["posted_urls"] = data
+                elif isinstance(data, dict):
+                    state["posted_urls"] = data.get("posted_urls", [])
+        except Exception:
+            pass
+    return state
+
+def save_state(state):
+    state["posted_urls"] = state["posted_urls"][-500:]
+    with open("posted_urls.json", "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+def pre_clean_text(text):
+    cleaned = re.sub(r"<[^>]+>", "", text)
+    patterns = [r"\[.*?\]", r"\(.*?\)", r"\|.*$"]
+    for p in patterns:
+        cleaned = re.sub(p, "", cleaned)
+    return cleaned.strip()
+
+def analyze_and_score_news(raw_title, raw_summary, source_name):
+    """
+    Evaluates Bangladesh news. Scores engagement 1-10 and generates
+    authentic journalistic Bengali copy.
+    """
+    clean_t = pre_clean_text(raw_title)
+    clean_s = pre_clean_text(raw_summary) if raw_summary else clean_t
+
+    prompt = f"""You are the Chief Editorial Strategist for 'Bongo Tribune' (a premier Bangladeshi newspaper).
+Analyze this story:
+Source: {source_name}
+Title: {clean_t}
+Summary: {clean_s}
+
+Requirements:
+1. BANGLADESH RELEVANCE:
+   - Does this directly involve Bangladesh (politics, society, sports, economy, international relations, crime, viral topics)?
+   - If it is purely international with zero connection to Bangladesh, output RELEVANT: NO.
+   - If it involves Bangladesh, output RELEVANT: YES.
+
+2. ENGAGEMENT SCORE (1 to 10):
+   - Rate public curiosity, debate, talking points, shock value, or viral potential in Bangladesh.
+   - High impact, breaking, or controversial stories get 8-10. Normal news gets 4-7. Low/routine gets 1-3.
+
+3. EDITORIAL CLASSIFICATION:
+   - IS_POLITICS: YES (if about BD national politics, political parties, government decisions, law/courts, state affairs) else NO.
+
+4. COPYWRITING (Always 100% fluent Bengali):
+   - HEADLINE: Catchy, powerful Bengali headline (max 10-14 words).
+   - SUB_HEADLINE: Contextual Bengali sub-headline (or 'None').
+   - SUMMARY: Exactly 2 crisp sentences in journalistic Bengali.
+
+Format EXACTLY like this:
+RELEVANT: YES or NO
+IS_POLITICS: YES or NO
+ENGAGEMENT_SCORE: <integer 1 to 10>
+HEADLINE: <bengali headline>
+SUB_HEADLINE: <bengali sub-headline or None>
+SUMMARY: <bengali summary>"""
+
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        text = response.text.strip()
+
+        is_rel = "YES" in re.findall(r"RELEVANT:\s*(YES|NO)", text, re.IGNORECASE)
+        if not is_rel:
+            return None
+
+        is_pol = "YES" in re.findall(r"IS_POLITICS:\s*(YES|NO)", text, re.IGNORECASE)
+
+        score_match = re.search(r"ENGAGEMENT_SCORE:\s*(\d+)", text)
+        score = int(score_match.group(1)) if score_match else 5
+
+        headline = clean_t
+        sub_headline = ""
+        summary = clean_s
+
+        for line in text.split("\n"):
+            line = line.strip()
+            if line.startswith("HEADLINE:"):
+                headline = line.replace("HEADLINE:", "").strip().replace('"', '')
+            elif line.startswith("SUB_HEADLINE:"):
+                sub = line.replace("SUB_HEADLINE:", "").strip().replace('"', '')
+                if sub.lower() != "none" and len(sub) > 3:
+                    sub_headline = sub
+            elif line.startswith("SUMMARY:"):
+                summary = line.replace("SUMMARY:", "").strip().replace('"', '')
+
+        return {
+            "headline": headline,
+            "sub_headline": sub_headline,
+            "summary": summary,
+            "is_politics": is_pol,
+            "score": score
+        }
+    except Exception as e:
+        print(f"Gemini evaluation error: {e}")
+        return None
+
+def clean_and_maximize_image_url(url):
+    if not url:
+        return url
+    url = re.sub(r'([?&])(w|width|h|height|max_width|resize|crop)=\d+[^&]*', '', url)
+    url = url.replace('/thumb/', '/').replace('/300/', '/1200/').replace('/640/', '/1200/')
+    url = re.sub(r'\?&+', '?', url)
+    url = re.sub(r'&+', '&', url)
+    url = re.sub(r'[?&]$', '', url)
+    return url
+
+def extract_high_res_image(entry):
+    try:
+        resp = requests.get(entry.link, timeout=9, headers=BROWSER_HEADERS)
+        if resp.status_code == 200:
+            html = resp.text
+
+            # 1. JSON-LD Structured Data
+            json_ld_matches = re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+            for jld in json_ld_matches:
+                try:
+                    data = json.loads(jld.strip())
+                    if isinstance(data, dict):
+                        img = data.get("image")
+                        if isinstance(img, str) and img.startswith("http"):
+                            return clean_and_maximize_image_url(img)
+                        elif isinstance(img, dict) and "url" in img:
+                            return clean_and_maximize_image_url(img["url"])
+                        elif isinstance(img, list) and len(img) > 0 and isinstance(img[0], str):
+                            return clean_and_maximize_image_url(img[0])
+                except Exception:
+                    pass
+
+            # 2. Meta tags
+            patterns = [
+                r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\'](https?://[^"\']+)["\']',
+                r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
+                r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
+                r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']',
+                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](https?://[^"\']+)["\']'
+            ]
+            for pat in patterns:
+                m = re.search(pat, html, re.IGNORECASE)
+                if m:
+                    candidate = m.group(1)
+                    if not candidate.endswith(('.svg', '.gif', '.ico')) and 'avatar' not in candidate.lower() and 'logo' not in candidate.lower():
+                        return clean_and_maximize_image_url(candidate)
+    except Exception:
+        pass
+
+    if 'media_content' in entry and len(entry.media_content) > 0:
+        url = entry.media_content[0].get('url')
+        if url and not url.endswith(('.svg', '.gif')):
+            return clean_and_maximize_image_url(url)
+
+    if 'enclosures' in entry and len(entry.enclosures) > 0:
+        url = entry.enclosures[0].get('href')
+        if url and not url.endswith(('.svg', '.gif')):
+            return clean_and_maximize_image_url(url)
+
+    return None
+
+def ensure_font_downloaded():
+    font_file = "HindSiliguri-Bold.ttf"
+    if not os.path.exists(font_file):
+        url = "https://raw.githubusercontent.com/google/fonts/main/ofl/hindsiliguri/HindSiliguri-Bold.ttf"
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                with open(font_file, "wb") as f:
+                    f.write(r.content)
+        except Exception:
+            pass
+    return font_file if os.path.exists(font_file) else None
+
+def get_font(size=32):
+    local_font = ensure_font_downloaded()
+    if local_font:
+        try:
+            return ImageFont.truetype(local_font, size)
+        except Exception:
+            pass
+    fallbacks = [
+        "/usr/share/fonts/truetype/noto/NotoSansBengali-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    ]
+    for fb in fallbacks:
+        if os.path.exists(fb):
+            try:
+                return ImageFont.truetype(fb, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+def wrap_text(text, font, max_width, draw):
+    lines = []
+    words = text.split()
+    current_line = []
+    for word in words:
+        test_line = " ".join(current_line + [word])
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        if (bbox[2] - bbox[0]) <= max_width:
+            current_line.append(word)
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+            current_line = [word]
+    if current_line:
+        lines.append(" ".join(current_line))
+    return lines
+
+def get_asset(base_name):
+    candidates = [
+        f"{base_name}.png", f"{base_name}.jpg", f"{base_name}.jpeg",
+        f"{base_name}.png.png", f"{base_name}.jpg.jpg", f"{base_name}.jpeg.jpeg"
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is_square=False):
+    width = 1080
+    height = 1080 if is_square else 1350
+    
+    top_h = int(height * 0.60)
+    card = Image.new("RGB", (width, height), color="#4c0000")
+    
+    # 1. TOP 60% IMAGE WITH GAUSSIAN BLUR FILLER (Zero Crop / Aspect Preserved)
+    try:
+        resp = requests.get(image_url, timeout=12, headers=BROWSER_HEADERS)
+        if resp.status_code != 200:
+            return None
+            
+        raw_img = Image.open(BytesIO(resp.content)).convert("RGB")
+        if raw_img.width < 350 or raw_img.height < 200:
+            return None
+        
+        bg_blur = raw_img.resize((width, top_h), Image.Resampling.BILINEAR)
+        bg_blur = bg_blur.filter(ImageFilter.GaussianBlur(radius=35))
+        
+        scale = min(width / raw_img.width, top_h / raw_img.height)
+        new_w = int(raw_img.width * scale)
+        new_h = int(raw_img.height * scale)
+        fit_img = raw_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        
+        paste_x = (width - new_w) // 2
+        paste_y = (top_h - new_h) // 2
+        bg_blur.paste(fit_img, (paste_x, paste_y))
+        
+        card.paste(bg_blur, (0, 0))
+    except Exception:
+        return None
+    
+    # 2. TOP HEADER LOGO ("Bongo Tribune")
+    header_path = get_asset("header_logo")
+    if header_path:
+        try:
+            h_logo = Image.open(header_path).convert("RGBA")
+            aspect = h_logo.width / h_logo.height
+            logo_h = 65
+            h_logo = h_logo.resize((int(logo_h * aspect), logo_h), Image.Resampling.LANCZOS)
+            card.paste(h_logo, (50, 45), mask=h_logo.split()[3])
+        except Exception:
+            pass
+            
+    # 3. FLOATING CHAT BUBBLE BOX (Overlaps 60/40 boundary)
+    bubble_w = 880
+    bubble_h = 490 if is_square else 560
+    bubble_x = (width - bubble_w) // 2
+    bubble_y = top_h - (bubble_h // 2) + 20
+    
+    bubble_img = Image.new("RGBA", (bubble_w, bubble_h), (0, 0, 0, 0))
+    b_draw = ImageDraw.Draw(bubble_img)
+    
+    tail_h = 35
+    b_draw.rounded_rectangle([(0, 0), (bubble_w, bubble_h - tail_h)], radius=24, fill=(255, 255, 255, 255))
+    
+    tail = [(bubble_w - 140, bubble_h - tail_h), (bubble_w - 40, bubble_h), (bubble_w - 40, bubble_h - tail_h)]
+    b_draw.polygon(tail, fill=(255, 255, 255, 255))
+    
+    # EMBED WATERMARK SEAL (Color: #4c0000 with 20% opacity)
+    watermark_path = get_asset("watermark")
+    if watermark_path:
+        try:
+            wm = Image.open(watermark_path).convert("RGBA")
+            wm_size = int(bubble_h * 0.72)
+            wm = wm.resize((wm_size, wm_size), Image.Resampling.LANCZOS)
+            
+            r, g, b, a = wm.split()
+            new_alpha = a.point(lambda p: int(p * 0.20))
+            
+            tinted_wm = Image.new("RGBA", (wm_size, wm_size), color=(76, 0, 0, 0))
+            tinted_wm.putalpha(new_alpha)
+            
+            wm_x = (bubble_w - wm_size) // 2
+            wm_y = (bubble_h - tail_h - wm_size) // 2
+            bubble_img.paste(tinted_wm, (wm_x, wm_y), mask=tinted_wm)
+        except Exception as e:
+            print(f"Watermark paste error: {e}")
+
+    font_hl = get_font(42 if not is_square else 36)
+    font_sub = get_font(30 if not is_square else 26)
+    font_sum = get_font(26 if not is_square else 23)
+    
+    text_pad_x = 45
+    text_y = 35
+    inner_w = bubble_w - (text_pad_x * 2)
+    
+    # Headline in bold maroon #4c0000
+    hl_lines = wrap_text(headline, font_hl, inner_w, b_draw)
+    for line in hl_lines[:3]:
+        bbox = b_draw.textbbox((0, 0), line, font=font_hl)
+        line_w = bbox[2] - bbox[0]
+        b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_hl)
+        text_y += (bbox[3] - bbox[0]) + 14
+
+    # Sub-headline in bold maroon #4c0000
+    if sub_headline:
+        text_y += 6
+        sub_lines = wrap_text(sub_headline, font_sub, inner_w, b_draw)
+        for line in sub_lines[:2]:
+            bbox = b_draw.textbbox((0, 0), line, font=font_sub)
+            line_w = bbox[2] - bbox[0]
+            b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_sub)
+            text_y += (bbox[3] - bbox[0]) + 10
+
+    # Summary in bold Pure Black #000000
+    text_y += 15
+    sum_lines = wrap_text(summary, font_sum, inner_w, b_draw)
+    for line in sum_lines[:4]:
+        bbox = b_draw.textbbox((0, 0), line, font=font_sum)
+        line_w = bbox[2] - bbox[0]
+        b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#000000", font=font_sum)
+        text_y += (bbox[3] - bbox[0]) + 8
+
+    card.paste(bubble_img, (bubble_x, bubble_y), mask=bubble_img)
+    
+    # 4. FOOTER: DATE ('01 JANUARY') & SOURCE
+    draw = ImageDraw.Draw(card)
+    font_footer = get_font(25)
+    
+    date_str = datetime.utcnow().strftime("%d %B").upper()
+    footer_y = height - 70
+    draw.text((60, footer_y), date_str, fill="#ffffff", font=font_footer)
+    
+    clean_source = source_name.replace("http://", "").replace("https://", "").replace("www.", "")
+    source_str = f"Source : {clean_source}"
+    src_bbox = draw.textbbox((0, 0), source_str, font=font_footer)
+    src_w = src_bbox[2] - src_bbox[0]
+    draw.text((width - 60 - src_w, footer_y), source_str, fill="#ffffff", font=font_footer)
+    
+    filename = "final_card_ig.jpg" if is_square else "final_card_fb.jpg"
+    card.save(filename, "JPEG", quality=95)
+    return filename
+
+def build_instagram_story(feed_card_path):
+    story_w, story_h = 1080, 1920
+    feed_card = Image.open(feed_card_path).convert("RGB")
+
+    bg = feed_card.resize((story_w, story_h), Image.Resampling.BILINEAR)
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=45))
+    dark_overlay = Image.new("RGB", (story_w, story_h), color="#000000")
+    bg = Image.blend(bg, dark_overlay, alpha=0.35)
+
+    target_card_w = int(story_w * 0.88)
+    scaled_card = feed_card.resize((target_card_w, target_card_w), Image.Resampling.LANCZOS)
+
+    radius = 32
+    mask = Image.new("L", (target_card_w, target_card_w), 0)
+    draw_mask = ImageDraw.Draw(mask)
+    draw_mask.rounded_rectangle([(0, 0), (target_card_w, target_card_w)], radius=radius, fill=255)
+
+    card_x = (story_w - target_card_w) // 2
+    card_y = (story_h - target_card_w) // 2 - 50
+    bg.paste(scaled_card, (card_x, card_y), mask)
+
+    draw = ImageDraw.Draw(bg)
+    handle_font = get_font(34)
+    draw.text((card_x + 10, card_y + target_card_w + 30), "@bongo.tribune", fill="#ffffff", font=handle_font)
+
+    story_path = "final_story_ig.jpg"
+    bg.save(story_path, "JPEG", quality=95)
+    return story_path
+
+def get_fb_image_url(photo_id):
+    try:
+        url = f"https://graph.facebook.com/v20.0/{photo_id}?fields=images&access_token={ACCESS_TOKEN}"
+        res = requests.get(url, timeout=10).json()
+        if "images" in res and len(res["images"]) > 0:
+            return res["images"][0]["source"]
+    except Exception as e:
+        print(f"Meta CDN error: {e}")
+    return None
+
+def post_facebook_feed(image_path, caption):
+    url = f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos"
+    payload = {"caption": caption, "published": "true", "access_token": ACCESS_TOKEN}
+    with open(image_path, "rb") as f:
+        res = requests.post(url, files={"source": f}, data=payload).json()
+        print("FB Feed response:", res)
+        return res
+
+def post_facebook_comment(target_id, message):
+    url = f"https://graph.facebook.com/v20.0/{target_id}/comments"
+    payload = {"message": message, "access_token": ACCESS_TOKEN}
+    try:
+        res = requests.post(url, data=payload, timeout=15).json()
+        print("FB Comment response:", res)
+        return res
+    except Exception as e:
+        print(f"FB Comment error: {e}")
+        return None
+
+def post_facebook_story(image_path):
+    url = f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos"
+    payload = {"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
+    with open(image_path, "rb") as f:
+        res = requests.post(url, files={"source": f}, data=payload).json()
+        photo_id = res.get("id")
+        if photo_id:
+            story_url = f"https://graph.facebook.com/v20.0/{PAGE_ID}/photo_stories"
+            requests.post(story_url, data={"photo_id": photo_id, "access_token": ACCESS_TOKEN})
+
+def wait_for_ig_container(creation_id):
+    status_url = f"https://graph.facebook.com/v20.0/{creation_id}?fields=status_code&access_token={ACCESS_TOKEN}"
+    for _ in range(8):
+        time.sleep(5)
+        res = requests.get(status_url).json()
+        if res.get("status_code") == "FINISHED":
+            return True
+        if res.get("status_code") == "ERROR":
+            return False
+    return True
+
+def post_instagram_feed(image_url, caption):
+    if not IG_USER_ID:
+        return None
+    create_url = f"https://graph.facebook.com/v20.0/{IG_USER_ID}/media"
+    payload = {"image_url": image_url, "caption": caption, "access_token": ACCESS_TOKEN}
+    res = requests.post(create_url, data=payload).json()
+    creation_id = res.get("id")
+    if not creation_id:
+        return None
+
+    if wait_for_ig_container(creation_id):
+        pub_url = f"https://graph.facebook.com/v20.0/{IG_USER_ID}/media_publish"
+        pub_res = requests.post(pub_url, data={"creation_id": creation_id, "access_token": ACCESS_TOKEN}).json()
+        print("IG Feed published:", pub_res)
+        return pub_res.get("id")
+    return None
+
+def post_instagram_story(story_image_url):
+    if not IG_USER_ID:
+        return
+    create_url = f"https://graph.facebook.com/v20.0/{IG_USER_ID}/media"
+    payload = {"image_url": story_image_url, "media_type": "STORIES", "access_token": ACCESS_TOKEN}
+    res = requests.post(create_url, data=payload).json()
+    creation_id = res.get("id")
+    if not creation_id:
+        return
+
+    if wait_for_ig_container(creation_id):
+        pub_url = f"https://graph.facebook.com/v20.0/{IG_USER_ID}/media_publish"
+        requests.post(pub_url, data={"creation_id": creation_id, "access_token": ACCESS_TOKEN})
+
+def publish_article(entry, source_name, img_url, curated):
+    headline = curated["headline"]
+    sub_headline = curated["sub_headline"]
+    summary = curated["summary"]
+    
+    print(f"Publishing article (Score {curated.get('score')}): {headline}")
+    
+    # 1. GENERATE FACEBOOK 4:5 CARD
+    fb_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=False)
+    if not fb_card_path:
+        return False
+        
+    # 2. GENERATE INSTAGRAM 1:1 SQUARE CARD
+    ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
+    
+    # All captions & comments strictly in authentic Bengali
+    post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
+    comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
+    
+    # Post Facebook Feed
+    fb_res = post_facebook_feed(fb_card_path, post_caption_fb)
+    fb_photo_id = fb_res.get("id") if isinstance(fb_res, dict) else None
+
+    # Post Comment directly under photo
+    if fb_photo_id:
+        post_facebook_comment(fb_photo_id, comment_text_fb)
+
+    # Post Facebook Story
+    try:
+        post_facebook_story(fb_card_path)
+    except Exception as err:
+        print(f"FB Story bypass: {err}")
+
+    # Post Instagram Feed & Story
+    if IG_USER_ID:
+        try:
+            temp_res = requests.post(
+                f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
+                files={"source": open(ig_card_path, "rb")},
+                data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
+            ).json()
+            ig_cdn_url = get_fb_image_url(temp_res.get("id"))
+            
+            if ig_cdn_url:
+                ig_caption = f"{headline}\n\n{summary}\n\nসূত্র: {source_name}\n\n#bongotribune #banglanews #bangladesh #news"
+                post_instagram_feed(ig_cdn_url, ig_caption)
+
+            styled_story_path = build_instagram_story(ig_card_path)
+            story_res = requests.post(
+                f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
+                files={"source": open(styled_story_path, "rb")},
+                data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
+            ).json()
+            story_cdn = get_fb_image_url(story_res.get("id"))
+            
+            if story_cdn:
+                post_instagram_story(story_cdn)
+        except Exception as err:
+            print(f"Instagram posting error: {err}")
+
+    return True
+
+def scan_all_feeds_and_rank_candidates(state):
+    """
+    Cycles through EVERY SINGLE FEED across Bangladesh and international outlets.
+    Extracts all fresh candidates and ranks them by engagement score.
+    """
+    print(f"Scanning {len(ALL_FEEDS)} media feeds for Bangladesh coverage...")
+    all_evaluated = []
+
+    for feed in ALL_FEEDS:
+        try:
+            parsed = feedparser.parse(feed["url"])
+            for entry in parsed.entries[:6]:  # Check top latest articles per feed
+                if entry.link in state["posted_urls"]:
+                    continue
+
+                clean_t = pre_clean_text(entry.title)
+                if len(clean_t.split()) < 3:
+                    continue
+
+                # Curate and evaluate via Gemini
+                raw_summary = entry.get("summary", "")
+                curated = analyze_and_score_news(entry.title, raw_summary, feed["name"])
+                if not curated:
+                    continue
+
+                # Ensure valid high-res image exists
+                img_url = extract_high_res_image(entry)
+                if not img_url:
+                    continue
+
+                all_evaluated.append({
+                    "entry": entry,
+                    "source_name": feed["name"],
+                    "img_url": img_url,
+                    "curated": curated,
+                    "is_politics": curated["is_politics"],
+                    "score": curated["score"]
+                })
+        except Exception as err:
+            continue
+
+    # Sort descending by engagement score (10 = highest potential)
+    all_evaluated.sort(key=lambda x: x["score"], reverse=True)
+    print(f"Scan complete. Found {len(all_evaluated)} verified Bangladesh news stories.")
+    return all_evaluated
+
+def main():
+    state = load_state()
+    candidates = scan_all_feeds_and_rank_candidates(state)
+
+    if not candidates:
+        print("No new qualifying Bangladesh articles found in this run.")
+        return
+
+    published_count = 0
+    selected_links = set()
+
+    # Slot 1: Strictly Bangladesh Politics with the HIGHEST engagement score
+    print("Selecting Slot 1: Top Politics Story...")
+    pol_candidates = [c for c in candidates if c["is_politics"]]
+    if pol_candidates:
+        chosen_pol = pol_candidates[0]
+        success = publish_article(chosen_pol["entry"], chosen_pol["source_name"], chosen_pol["img_url"], chosen_pol["curated"])
+        if success:
+            state["posted_urls"].append(chosen_pol["entry"].link)
+            selected_links.add(chosen_pol["entry"].link)
+            save_state(state)
+            published_count += 1
+            time.sleep(25)  # Safe spacing between posts
+
+    # Slots 2 & 3: Top Remaining Bangladesh News with HIGHEST engagement scores
+    print("Selecting Slots 2 & 3: Highest Engagement Bangladesh News...")
+    for c in candidates:
+        if published_count >= 3:
+            break
+        if c["entry"].link in selected_links:
+            continue
+
+        success = publish_article(c["entry"], c["source_name"], c["img_url"], c["curated"])
+        if success:
+            state["posted_urls"].append(c["entry"].link)
+            selected_links.add(c["entry"].link)
+            save_state(state)
+            published_count += 1
+            time.sleep(25)
+
+    print(f"Cycle finished. Successfully published {published_count} high-impact stories.")
+
+if __name__ == "__main__":
+    main()
