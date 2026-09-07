@@ -48,12 +48,6 @@ BROWSER_HEADERS = {
     "Accept-Language": "bn,en-US;q=0.9,en;q=0.8"
 }
 
-POLITICS_KEYWORDS = [
-    "সরকার", "রাজনৈতিক", "নির্বাচন", "উপদেষ্টা", "আওয়ামী", "বিএনপি", "জামায়াত", "সংসদ", "আইন", 
-    "আদালত", "মামলা", "গ্রেফতার", "পুলিশ", "সেনাবাহিনী", "রিমান্ড", "politics", "political", 
-    "election", "government", "adviser", "bnp", "awami", "court", "arrest", "minister", "parliament"
-]
-
 def load_state():
     state = {"posted_urls": []}
     if os.path.exists("posted_urls.json"):
@@ -104,13 +98,12 @@ def is_mostly_english(text):
     return eng_chars > bng_chars
 
 def query_llm_dual_engine(prompt):
-    """Executes AI queries on Groq first with thinking stripped, falling back cleanly."""
     if groq_client and ACTIVE_GROQ_MODELS:
         for model in ACTIVE_GROQ_MODELS[:3]:
             try:
                 res = groq_client.chat.completions.create(
                     messages=[
-                        {"role": "system", "content": "You are the Senior Bangla Editor of Bongo Tribune. Do not think out loud or output English. Write 100% in fluent journalistic Bengali (বাংলা)."},
+                        {"role": "system", "content": "You are the Senior Bangla News Editor of Bongo Tribune. You write 100% in fluent, professional, journalistic Bengali (বাংলা). Never output English or internal thoughts."},
                         {"role": "user", "content": prompt}
                     ],
                     model=model,
@@ -158,19 +151,19 @@ Title: {clean_t}
 Summary: {clean_s}
 
 You are the Chief News Editor of Bongo Tribune.
-Requirements:
-1. Translate and write EVERYTHING in 100% fluent journalistic BENGALI (বাংলা). Absolutely zero English characters in headline or summary.
-2. Provide a 3 to 4 complete sentence Bengali summary (45 to 60 words). Do not cut off.
+Select this nationwide Bangladesh story (politics, economy, crime, social debate, sports, national life).
+
+CRITICAL RULES:
+1. Output MUST be 100% in fluent journalistic BENGALI (বাংলা). Zero English characters. Translate all English news into high-impact Bengali.
+2. Provide a 3 to 4 complete sentence Bengali summary (45 to 60 words). Never cut off mid-sentence.
 3. Output format must use these exact delimiters:
 
 ###HEADLINE###
-<Bangla headline here>
+<বাংলায় আকর্ষণীয় শিরোনাম>
 ###SUBHEADLINE###
-<Bangla subheadline or None>
+<বাংলায় উপ-শিরোনাম অথবা None>
 ###SUMMARY###
-<Bangla summary here>
-###ISPOLITICS###
-<YES or NO>
+<বাংলায় ৩-৪ বাক্যের বিস্তারিত প্রতিবেদন>
 ###SCORE###
 <1-10>"""
 
@@ -182,12 +175,10 @@ Requirements:
         clean_resp = re.sub(r"<think>[\s\S]*?</think>", "", response_text, flags=re.IGNORECASE)
         clean_resp = re.sub(r"<think>[\s\S]*", "", clean_resp, flags=re.IGNORECASE).strip()
 
-        # Delimiter-based extraction
         headline = ""
         sub_headline = ""
         summary = ""
-        is_pol = False
-        score = 6
+        score = 7
 
         hl_m = re.search(r"###HEADLINE###\s*([\s\S]*?)(?=###SUBHEADLINE###|$)", clean_resp)
         if hl_m:
@@ -199,13 +190,9 @@ Requirements:
             if sub.lower() not in ["none", "null", "নেই"] and len(sub) > 3:
                 sub_headline = sub
 
-        sum_m = re.search(r"###SUMMARY###\s*([\s\S]*?)(?=###ISPOLITICS###|$)", clean_resp)
+        sum_m = re.search(r"###SUMMARY###\s*([\s\S]*?)(?=###SCORE###|$)", clean_resp)
         if sum_m:
             summary = sum_m.group(1).strip(' \n"')
-
-        pol_m = re.search(r"###ISPOLITICS###\s*(YES|NO)", clean_resp, re.IGNORECASE)
-        if pol_m:
-            is_pol = "YES" in pol_m.group(1).upper()
 
         score_m = re.search(r"###SCORE###\s*(\d+)", clean_resp)
         if score_m:
@@ -246,14 +233,10 @@ Requirements:
         if not summary or len(summary) < 15:
             summary = force_translate_to_bangla(clean_s[:250])
 
-        if not is_pol:
-            is_pol = any(k in (clean_t + " " + clean_s).lower() for k in POLITICS_KEYWORDS)
-
         return {
             "headline": headline,
             "sub_headline": sub_headline,
             "summary": summary,
-            "is_politics": is_pol,
             "score": score
         }
     except Exception as e:
@@ -416,12 +399,12 @@ def download_image_robust(url, fallback_query=""):
 def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is_square=False):
     width = 1080
     height = 1080 if is_square else 1350
-    top_h = int(height * 0.60)  # Top 60% dedicated to photo
+    top_h = int(height * 0.60)  # Top 60% strictly for photo
 
     # Base card: Lower 40% strictly locked to maroon #4c0000 (RGB: 76, 0, 0)
     card = Image.new("RGB", (width, height), color=(76, 0, 0))
 
-    # 1. PHOTO (Top 60% with Gaussian Blur Ambient Fill)
+    # 1. TOP 60% PHOTO WITH GAUSSIAN BLUR FILLER
     raw_img = download_image_robust(image_url, fallback_query=headline)
     if raw_img:
         try:
@@ -696,7 +679,7 @@ def publish_article(entry, source_name, img_url, curated):
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
 
-    # Facebook Caption: Headline + Clean Summary + Link Prompt
+    # Facebook Caption: Bengali Headline + Complete Summary + Link Prompt
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
     comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
 
@@ -724,7 +707,7 @@ def publish_article(entry, source_name, img_url, curated):
             ig_cdn_url = get_fb_image_url(temp_res.get("id"))
 
             if ig_cdn_url:
-                # INSTAGRAM CAPTION: Headline + Source + Hashtags (SUMMARY SKIPPED AS REQUESTED)
+                # INSTAGRAM CAPTION: Headline + Source + Hashtags (SUMMARY OMITTED FOR CLEAN FEED)
                 ig_caption = f"{headline}\n\nসূত্র: {source_name}\n\n#bongotribune #banglanews #bangladesh #news"
                 post_instagram_feed(ig_cdn_url, ig_caption)
 
@@ -762,11 +745,10 @@ def scan_feeds_smart(state):
                     continue
 
                 raw_summary = entry.get("summary", "")
-                is_pol_hint = any(k in (clean_t + " " + raw_summary).lower() for k in POLITICS_KEYWORDS)
                 valid_for_this_feed.append({
                     "entry": entry,
                     "source": feed["name"],
-                    "is_pol_hint": is_pol_hint
+                    "raw_summary": raw_summary
                 })
             if valid_for_this_feed:
                 feed_entries_map[feed["name"]] = valid_for_this_feed
@@ -790,7 +772,7 @@ def scan_feeds_smart(state):
 
     for item in evaluation_queue:
         entry = item["entry"]
-        curated = analyze_and_score_news(entry.title, entry.get("summary", ""), item["source"])
+        curated = analyze_and_score_news(entry.title, item["raw_summary"], item["source"])
         if curated:
             img_url = extract_high_res_image(entry)
             qualifying_candidates.append({
@@ -798,10 +780,9 @@ def scan_feeds_smart(state):
                 "source_name": item["source"],
                 "img_url": img_url,
                 "curated": curated,
-                "is_politics": curated["is_politics"],
                 "score": curated["score"]
             })
-            print(f"Evaluated: [{item['source']}] {curated['headline']}", flush=True)
+            print(f"Evaluated: [{item['source']}] {curated['headline']} | Score: {curated['score']}", flush=True)
         time.sleep(1)
 
     qualifying_candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -818,20 +799,8 @@ def main():
     published_count = 0
     used_sources = set()
 
-    # Slot 1: Top Politics Story
-    pol_candidates = [c for c in candidates if c["is_politics"]]
-    if pol_candidates:
-        chosen_pol = pol_candidates[0]
-        print(f"Publishing Slot 1 (Politics from {chosen_pol['source_name']})...", flush=True)
-        if publish_article(chosen_pol["entry"], chosen_pol["source_name"], chosen_pol["img_url"], chosen_pol["curated"]):
-            state["posted_urls"].append(chosen_pol["entry"].link)
-            used_sources.add(chosen_pol["source_name"])
-            save_state(state)
-            published_count += 1
-            time.sleep(15)
-
-    # Slots 2 & 3: High-Engagement Stories from Different Outlets
-    print("Publishing Slots 2 & 3 (Varied Outlets)...", flush=True)
+    # Publish top 3 nationwide engaging stories across different outlets
+    print("Publishing Top 3 Nationwide Engaging Stories...", flush=True)
     for c in candidates:
         if published_count >= 3:
             break
