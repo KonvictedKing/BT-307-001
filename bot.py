@@ -71,6 +71,9 @@ ALL_FEEDS = [
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
+# Available models in priority order
+GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-2.5-flash-lite']
+
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -104,10 +107,6 @@ def pre_clean_text(text):
     return cleaned.strip()
 
 def analyze_and_score_news(raw_title, raw_summary, source_name):
-    """
-    Evaluates Bangladesh news. Scores engagement 1-10 and generates
-    authentic journalistic Bengali copy.
-    """
     clean_t = pre_clean_text(raw_title)
     clean_s = pre_clean_text(raw_summary) if raw_summary else clean_t
 
@@ -120,7 +119,7 @@ Summary: {clean_s}
 Requirements:
 1. BANGLADESH RELEVANCE:
    - Does this directly involve Bangladesh (politics, society, sports, economy, international relations, crime, viral topics)?
-   - If it is purely international with zero connection to Bangladesh, output RELEVANT: NO.
+   - If purely international with zero connection to Bangladesh, output RELEVANT: NO.
    - If it involves Bangladesh, output RELEVANT: YES.
 
 2. ENGAGEMENT SCORE (1 to 10):
@@ -143,13 +142,24 @@ HEADLINE: <bengali headline>
 SUB_HEADLINE: <bengali sub-headline or None>
 SUMMARY: <bengali summary>"""
 
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-        )
-        text = response.text.strip()
+    response = None
+    for model_name in GEMINI_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            if response and response.text:
+                break
+        except Exception as e:
+            print(f"Model {model_name} failed: {e}")
+            continue
 
+    if not response or not response.text:
+        return None
+
+    try:
+        text = response.text.strip()
         is_rel = "YES" in re.findall(r"RELEVANT:\s*(YES|NO)", text, re.IGNORECASE)
         if not is_rel:
             return None
@@ -182,7 +192,7 @@ SUMMARY: <bengali summary>"""
             "score": score
         }
     except Exception as e:
-        print(f"Gemini evaluation error: {e}")
+        print(f"Parsing error: {e}")
         return None
 
 def clean_and_maximize_image_url(url):
@@ -201,7 +211,6 @@ def extract_high_res_image(entry):
         if resp.status_code == 200:
             html = resp.text
 
-            # 1. JSON-LD Structured Data
             json_ld_matches = re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
             for jld in json_ld_matches:
                 try:
@@ -217,7 +226,6 @@ def extract_high_res_image(entry):
                 except Exception:
                     pass
 
-            # 2. Meta tags
             patterns = [
                 r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\'](https?://[^"\']+)["\']',
                 r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
@@ -312,7 +320,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     top_h = int(height * 0.60)
     card = Image.new("RGB", (width, height), color="#4c0000")
     
-    # 1. TOP 60% IMAGE WITH GAUSSIAN BLUR FILLER (Zero Crop / Aspect Preserved)
+    # 1. TOP 60% IMAGE WITH GAUSSIAN BLUR FILLER
     try:
         resp = requests.get(image_url, timeout=12, headers=BROWSER_HEADERS)
         if resp.status_code != 200:
@@ -350,7 +358,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         except Exception:
             pass
             
-    # 3. FLOATING CHAT BUBBLE BOX (Overlaps 60/40 boundary)
+    # 3. FLOATING CHAT BUBBLE BOX
     bubble_w = 880
     bubble_h = 490 if is_square else 560
     bubble_x = (width - bubble_w) // 2
@@ -365,7 +373,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     tail = [(bubble_w - 140, bubble_h - tail_h), (bubble_w - 40, bubble_h), (bubble_w - 40, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
     
-    # EMBED WATERMARK SEAL (Color: #4c0000 with 20% opacity)
+    # WATERMARK SEAL: #4c0000 with 20% opacity
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
@@ -422,7 +430,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 
     card.paste(bubble_img, (bubble_x, bubble_y), mask=bubble_img)
     
-    # 4. FOOTER: DATE ('01 JANUARY') & SOURCE
+    # 4. FOOTER: DATE & SOURCE
     draw = ImageDraw.Draw(card)
     font_footer = get_font(25)
     
@@ -565,7 +573,7 @@ def publish_article(entry, source_name, img_url, curated):
     # 2. GENERATE INSTAGRAM 1:1 SQUARE CARD
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
     
-    # All captions & comments strictly in authentic Bengali
+    # Strictly 100% Bengali caption & comment
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
     comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
     
@@ -613,17 +621,13 @@ def publish_article(entry, source_name, img_url, curated):
     return True
 
 def scan_all_feeds_and_rank_candidates(state):
-    """
-    Cycles through EVERY SINGLE FEED across Bangladesh and international outlets.
-    Extracts all fresh candidates and ranks them by engagement score.
-    """
     print(f"Scanning {len(ALL_FEEDS)} media feeds for Bangladesh coverage...")
     all_evaluated = []
 
     for feed in ALL_FEEDS:
         try:
             parsed = feedparser.parse(feed["url"])
-            for entry in parsed.entries[:6]:  # Check top latest articles per feed
+            for entry in parsed.entries[:6]:
                 if entry.link in state["posted_urls"]:
                     continue
 
@@ -631,13 +635,11 @@ def scan_all_feeds_and_rank_candidates(state):
                 if len(clean_t.split()) < 3:
                     continue
 
-                # Curate and evaluate via Gemini
                 raw_summary = entry.get("summary", "")
                 curated = analyze_and_score_news(entry.title, raw_summary, feed["name"])
                 if not curated:
                     continue
 
-                # Ensure valid high-res image exists
                 img_url = extract_high_res_image(entry)
                 if not img_url:
                     continue
@@ -650,10 +652,9 @@ def scan_all_feeds_and_rank_candidates(state):
                     "is_politics": curated["is_politics"],
                     "score": curated["score"]
                 })
-        except Exception as err:
+        except Exception:
             continue
 
-    # Sort descending by engagement score (10 = highest potential)
     all_evaluated.sort(key=lambda x: x["score"], reverse=True)
     print(f"Scan complete. Found {len(all_evaluated)} verified Bangladesh news stories.")
     return all_evaluated
@@ -669,7 +670,7 @@ def main():
     published_count = 0
     selected_links = set()
 
-    # Slot 1: Strictly Bangladesh Politics with the HIGHEST engagement score
+    # Slot 1: Strictly Bangladesh Politics
     print("Selecting Slot 1: Top Politics Story...")
     pol_candidates = [c for c in candidates if c["is_politics"]]
     if pol_candidates:
@@ -680,9 +681,9 @@ def main():
             selected_links.add(chosen_pol["entry"].link)
             save_state(state)
             published_count += 1
-            time.sleep(25)  # Safe spacing between posts
+            time.sleep(25)
 
-    # Slots 2 & 3: Top Remaining Bangladesh News with HIGHEST engagement scores
+    # Slots 2 & 3: High-Engagement Stories
     print("Selecting Slots 2 & 3: Highest Engagement Bangladesh News...")
     for c in candidates:
         if published_count >= 3:
