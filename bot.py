@@ -44,7 +44,7 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "bn,en-US;q=0.9,en;q=0.8"
 }
 
@@ -96,16 +96,6 @@ def get_live_groq_models():
 
 ACTIVE_GROQ_MODELS = get_live_groq_models()
 
-def clean_extracted_text(text):
-    """Strips metadata tags, thinking tokens, and residual formatting."""
-    if not text:
-        return ""
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<think>[\s\S]*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b(?:IS_?POLITICS|ENGAGEMENT_?SCORE|SCORE|POLITICS|RELEVANT)\s*[:\-]?\s*.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"[*#_`]", "", text)
-    return text.strip(' \n"')
-
 def is_mostly_english(text):
     if not text:
         return False
@@ -113,28 +103,51 @@ def is_mostly_english(text):
     bng_chars = len(re.findall(r'[\u0980-\u09FF]', text))
     return eng_chars > bng_chars
 
-def force_translate_to_bangla(english_text):
-    """Direct translation fallback ensuring Bengali output."""
-    if not english_text or not is_mostly_english(english_text):
-        return english_text
-    prompt = f"Translate strictly to journalistic Bengali. Output only the translation:\n\n{english_text}"
+def query_llm_dual_engine(prompt):
+    """Executes AI queries on Groq first with thinking stripped, falling back cleanly."""
     if groq_client and ACTIVE_GROQ_MODELS:
-        try:
-            res = groq_client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You are a professional Bengali translator. Output ONLY Bengali text. No English. No thoughts."},
-                    {"role": "user", "content": prompt}
-                ],
-                model=ACTIVE_GROQ_MODELS[0],
-                temperature=0.1,
-                max_tokens=250,
-            )
-            clean = clean_extracted_text(res.choices[0].message.content)
-            if clean and not is_mostly_english(clean):
-                return clean
-        except Exception:
-            pass
-    return english_text
+        for model in ACTIVE_GROQ_MODELS[:3]:
+            try:
+                res = groq_client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": "You are the Senior Bangla Editor of Bongo Tribune. Do not think out loud or output English. Write 100% in fluent journalistic Bengali (বাংলা)."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    model=model,
+                    temperature=0.1,
+                    max_tokens=350,
+                )
+                raw_text = res.choices[0].message.content
+                clean = re.sub(r"<think>[\s\S]*?</think>", "", raw_text, flags=re.IGNORECASE)
+                clean = re.sub(r"<think>[\s\S]*", "", clean, flags=re.IGNORECASE).strip()
+                if len(clean) > 20:
+                    return clean
+            except Exception as ge:
+                print(f"Groq {model} error: {ge}", flush=True)
+
+    if gemini_client:
+        for model in ["gemini-3.6-flash", "gemini-3.5-flash"]:
+            try:
+                res = gemini_client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                )
+                if res and res.text:
+                    clean = re.sub(r"<think>[\s\S]*?</think>", "", res.text, flags=re.IGNORECASE).strip()
+                    if len(clean) > 20:
+                        return clean
+            except Exception:
+                break
+    return None
+
+def force_translate_to_bangla(text):
+    if not text or not is_mostly_english(text):
+        return text
+    prompt = f"Translate the following news text strictly into formal journalistic Bengali. Do NOT add notes or English:\n\n{text}"
+    translated = query_llm_dual_engine(prompt)
+    if translated and not is_mostly_english(translated):
+        return re.sub(r"[*#_`]", "", translated).strip(' "')
+    return text
 
 def analyze_and_score_news(raw_title, raw_summary, source_name):
     clean_t = pre_clean_text(raw_title)
@@ -144,85 +157,84 @@ def analyze_and_score_news(raw_title, raw_summary, source_name):
 Title: {clean_t}
 Summary: {clean_s}
 
-You are the Chief Bangla News Editor of 'Bongo Tribune'.
-Return a JSON object with:
-1. "headline": Catchy, formal news headline in 100% fluent BENGALI (বাংলা). NEVER English.
-2. "sub_headline": Short context in BENGALI (or null).
-3. "summary": Exactly 3 to 4 complete, informative sentences in 100% fluent journalistic BENGALI (বাংলা). Around 45-60 words. Never cut off mid-sentence.
-4. "is_politics": true or false.
-5. "score": Integer 1 to 10 for viral public interest in Bangladesh.
+You are the Chief News Editor of Bongo Tribune.
+Requirements:
+1. Translate and write EVERYTHING in 100% fluent journalistic BENGALI (বাংলা). Absolutely zero English characters in headline or summary.
+2. Provide a 3 to 4 complete sentence Bengali summary (45 to 60 words). Do not cut off.
+3. Output format must use these exact delimiters:
 
-OUTPUT FORMAT: Strict JSON only. No text before or after."""
+###HEADLINE###
+<Bangla headline here>
+###SUBHEADLINE###
+<Bangla subheadline or None>
+###SUMMARY###
+<Bangla summary here>
+###ISPOLITICS###
+<YES or NO>
+###SCORE###
+<1-10>"""
 
-    raw_response = ""
-    # Try Groq with JSON format
-    if groq_client and ACTIVE_GROQ_MODELS:
-        for model in ACTIVE_GROQ_MODELS[:2]:
-            try:
-                res = groq_client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "You output only valid JSON with 100% Bengali text fields."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    model=model,
-                    temperature=0.1,
-                    response_format={"type": "json_object"},
-                    max_tokens=400,
-                )
-                raw_response = res.choices[0].message.content
-                break
-            except Exception:
-                continue
-
-    # Fallback to Gemini if needed
-    if not raw_response and gemini_client:
-        for model in ["gemini-3.6-flash", "gemini-3.5-flash"]:
-            try:
-                res = gemini_client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                )
-                if res and res.text:
-                    raw_response = res.text
-                    break
-            except Exception:
-                continue
-
-    if not raw_response:
+    response_text = query_llm_dual_engine(prompt)
+    if not response_text:
         return None
 
     try:
-        # Parse JSON
-        raw_response = clean_extracted_text(raw_response)
-        json_match = re.search(r"\{[\s\S]*\}", raw_response)
-        if json_match:
-            data = json.loads(json_match.group(0))
-        else:
-            data = json.loads(raw_response)
+        clean_resp = re.sub(r"<think>[\s\S]*?</think>", "", response_text, flags=re.IGNORECASE)
+        clean_resp = re.sub(r"<think>[\s\S]*", "", clean_resp, flags=re.IGNORECASE).strip()
 
-        headline = clean_extracted_text(str(data.get("headline", "")))
-        sub_headline = clean_extracted_text(str(data.get("sub_headline", "")))
-        summary = clean_extracted_text(str(data.get("summary", "")))
-        is_pol = bool(data.get("is_politics", False))
-        score = int(data.get("score", 6))
+        # Delimiter-based extraction
+        headline = ""
+        sub_headline = ""
+        summary = ""
+        is_pol = False
+        score = 6
 
-        if not sub_headline or sub_headline.lower() in ["none", "null"]:
-            sub_headline = ""
+        hl_m = re.search(r"###HEADLINE###\s*([\s\S]*?)(?=###SUBHEADLINE###|$)", clean_resp)
+        if hl_m:
+            headline = hl_m.group(1).strip(' \n"')
 
-        # Language Guard: Convert any remaining English to Bengali
+        sub_m = re.search(r"###SUBHEADLINE###\s*([\s\S]*?)(?=###SUMMARY###|$)", clean_resp)
+        if sub_m:
+            sub = sub_m.group(1).strip(' \n"')
+            if sub.lower() not in ["none", "null", "নেই"] and len(sub) > 3:
+                sub_headline = sub
+
+        sum_m = re.search(r"###SUMMARY###\s*([\s\S]*?)(?=###ISPOLITICS###|$)", clean_resp)
+        if sum_m:
+            summary = sum_m.group(1).strip(' \n"')
+
+        pol_m = re.search(r"###ISPOLITICS###\s*(YES|NO)", clean_resp, re.IGNORECASE)
+        if pol_m:
+            is_pol = "YES" in pol_m.group(1).upper()
+
+        score_m = re.search(r"###SCORE###\s*(\d+)", clean_resp)
+        if score_m:
+            score = int(score_m.group(1))
+
+        # Fallback if delimiters were omitted
+        if not headline or not summary:
+            for line in clean_resp.split("\n"):
+                line = line.strip()
+                if not headline and len(line) > 5 and not line.startswith("#"):
+                    headline = line
+                elif not summary and len(line) > 20 and line != headline:
+                    summary = line
+
+        # Strip any stray tags
+        headline = re.sub(r"(?:IS_?POLITICS|ENGAGEMENT|SCORE|###)[\s\S]*", "", headline, flags=re.IGNORECASE).strip()
+        summary = re.sub(r"(?:IS_?POLITICS|ENGAGEMENT|SCORE|###)[\s\S]*", "", summary, flags=re.IGNORECASE).strip()
+
+        # Language Guard: Force Bengali if source was English
         if is_mostly_english(headline):
-            print(f"Translating English headline: {headline[:30]}...", flush=True)
             headline = force_translate_to_bangla(headline)
         if sub_headline and is_mostly_english(sub_headline):
             sub_headline = force_translate_to_bangla(sub_headline)
         if is_mostly_english(summary):
-            print(f"Translating English summary...", flush=True)
             summary = force_translate_to_bangla(summary)
 
-        # Ensure summary ends with a proper sentence terminator
+        # Ensure sentence completion
         summary = summary.strip()
         if summary and not summary.endswith(('।', '.', '!', '?')):
-            # If cut off, cleanly end at the last punctuation mark
             last_punc = max(summary.rfind('।'), summary.rfind('.'))
             if last_punc > 20:
                 summary = summary[:last_punc + 1]
@@ -245,7 +257,7 @@ OUTPUT FORMAT: Strict JSON only. No text before or after."""
             "score": score
         }
     except Exception as e:
-        print(f"JSON parsing fallback: {e}", flush=True)
+        print(f"Extraction error: {e}", flush=True)
         return None
 
 def clean_and_maximize_image_url(url):
@@ -261,7 +273,7 @@ def clean_and_maximize_image_url(url):
 def search_related_news_image(query):
     try:
         clean_q = re.sub(r"[^\w\s]", " ", query)[:45].strip()
-        encoded = urllib.parse.quote(f"{clean_q} bangladesh news")
+        encoded = urllib.parse.quote(f"{clean_q} news bangladesh")
         url = f"https://html.duckduckgo.com/html/?q={encoded}"
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6)
         candidates = re.findall(r'//external-content\.duckduckgo\.com/iu/\?u=(https?://[^&"\']+)', resp.text)
@@ -406,10 +418,10 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     height = 1080 if is_square else 1350
     top_h = int(height * 0.60)  # Top 60% dedicated to photo
 
-    # Base card: Lower 40% is strictly maroon #4c0000 (RGB: 76, 0, 0)
+    # Base card: Lower 40% strictly locked to maroon #4c0000 (RGB: 76, 0, 0)
     card = Image.new("RGB", (width, height), color=(76, 0, 0))
 
-    # 1. TOP 60% PHOTO WITH GAUSSIAN BLUR FILLER
+    # 1. PHOTO (Top 60% with Gaussian Blur Ambient Fill)
     raw_img = download_image_robust(image_url, fallback_query=headline)
     if raw_img:
         try:
@@ -451,30 +463,28 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     b_draw = ImageDraw.Draw(bubble_img)
     tail_h = 45
 
-    # White Chat Bubble Background
+    # White bubble box
     b_draw.rounded_rectangle([(0, 0), (bubble_w, bubble_h - tail_h)], radius=26, fill=(255, 255, 255, 255))
 
-    # Speech Tail pointing down toward the right
+    # Speech tail pointing down right above source
     tail = [(bubble_w - 150, bubble_h - tail_h), (bubble_w - 55, bubble_h), (bubble_w - 55, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
-    # WATERMARK SEAL: Subtle 10% alpha background tint
+    # Watermark Seal: subtle 10% alpha background tint
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
             wm = Image.open(watermark_path).convert("RGBA")
             wm_size = int(bubble_h * 0.65)
             wm = wm.resize((wm_size, wm_size), Image.Resampling.LANCZOS)
-            
             r, g, b, a = wm.split()
             subtle_alpha = a.point(lambda p: int(p * 0.10))
             tinted_wm = Image.merge("RGBA", (r, g, b, subtle_alpha))
-
             wm_x = (bubble_w - wm_size) // 2
             wm_y = (bubble_h - tail_h - wm_size) // 2
             bubble_img.paste(tinted_wm, (wm_x, wm_y), mask=tinted_wm)
-        except Exception as e:
-            print(f"Watermark note: {e}", flush=True)
+        except Exception:
+            pass
 
     font_hl = get_font(44 if not is_square else 36)
     font_sub = get_font(30 if not is_square else 25)
@@ -485,13 +495,12 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     hl_lines = wrap_text(headline, font_hl, inner_w, b_draw)[:3]
     sub_lines = wrap_text(sub_headline, font_sub, inner_w, b_draw)[:2] if sub_headline else []
 
-    # DYNAMIC FONT SCALING FOR SUMMARY (Guarantees no mid-sentence cuts)
+    # Dynamic Font Scaling for Summary (Prevents cut-offs)
     usable_bubble_h = bubble_h - tail_h
     sum_size = 26 if not is_square else 22
     font_sum = get_font(sum_size)
     sum_lines = wrap_text(summary, font_sum, inner_w, b_draw)
 
-    # If summary is too long, smoothly step down font size to fit completely
     while len(sum_lines) > 5 and sum_size > 19:
         sum_size -= 2
         font_sum = get_font(sum_size)
@@ -687,7 +696,7 @@ def publish_article(entry, source_name, img_url, curated):
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
 
-    # Facebook Caption: Bengali Headline + Complete Summary + Link Prompt
+    # Facebook Caption: Headline + Clean Summary + Link Prompt
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
     comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
 
@@ -715,7 +724,7 @@ def publish_article(entry, source_name, img_url, curated):
             ig_cdn_url = get_fb_image_url(temp_res.get("id"))
 
             if ig_cdn_url:
-                # INSTAGRAM CAPTION: Headline + Source + Hashtags (SUMMARY OMITTED FOR CLEAN FEED)
+                # INSTAGRAM CAPTION: Headline + Source + Hashtags (SUMMARY SKIPPED AS REQUESTED)
                 ig_caption = f"{headline}\n\nসূত্র: {source_name}\n\n#bongotribune #banglanews #bangladesh #news"
                 post_instagram_feed(ig_cdn_url, ig_caption)
 
