@@ -9,11 +9,15 @@ from io import BytesIO
 import feedparser
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+# Dual AI Providers
+from groq import Groq
 from google import genai
 
 PAGE_ID = os.environ.get("FB_PAGE_ID")
 IG_USER_ID = os.environ.get("IG_USER_ID")
 ACCESS_TOKEN = os.environ.get("FB_ACCESS_TOKEN")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # MASTER NEWS DIRECTORY: BANGLADESH & GLOBAL OUTLETS
@@ -51,10 +55,9 @@ ALL_FEEDS = [
     {"name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml"}
 ]
 
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-
-# Supported model fallbacks
-GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
+# Initialize Clients
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -100,6 +103,43 @@ def quick_bd_relevance_check(title, summary, is_international):
         return any(k in combined for k in ["bangladesh", "dhaka", "hasina", "yunus", "bengali"])
     return True
 
+def query_llm_dual_engine(prompt):
+    """
+    Attempts generation with Groq first (high speed & generous limits).
+    Fails over to Gemini if Groq encounters an issue, ensuring zero downtime.
+    """
+    # 1. Try Groq (Fast & high limits)
+    if groq_client:
+        for model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+            try:
+                res = groq_client.chat.completions.create(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=model,
+                    temperature=0.3,
+                    max_tokens=250,
+                )
+                text = res.choices[0].message.content.strip()
+                text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+                if len(text) > 20:
+                    return text
+            except Exception as ge:
+                print(f"Groq {model} bypassed: {ge}")
+
+    # 2. Fallback to Gemini
+    if gemini_client:
+        for model in ["gemini-2.5-flash", "gemini-3.6-flash"]:
+            try:
+                res = gemini_client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                )
+                if res and res.text and len(res.text.strip()) > 20:
+                    return res.text.strip()
+            except Exception as gme:
+                print(f"Gemini {model} bypassed: {gme}")
+
+    return None
+
 def analyze_and_score_news(raw_title, raw_summary, source_name):
     clean_t = pre_clean_text(raw_title)
     clean_s = pre_clean_text(raw_summary) if raw_summary else clean_t
@@ -129,49 +169,24 @@ HEADLINE: <bengali headline>
 SUB_HEADLINE: <bengali sub-headline or None>
 SUMMARY: <bengali summary>"""
 
-    response = None
-    for model_name in GEMINI_MODELS:
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                )
-                if response and response.text:
-                    break
-            except Exception as e:
-                err_str = str(e)
-                if "429" in err_str:
-                    wait_time = 15
-                    m = re.search(r"retry in (\d+)", err_str)
-                    if m:
-                        wait_time = int(m.group(1)) + 2
-                    print(f"Quota pause: sleeping {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"Model {model_name} error: {e}")
-                    break
-        if response and response.text:
-            break
-
-    if not response or not response.text:
+    response_text = query_llm_dual_engine(prompt)
+    if not response_text:
         return None
 
     try:
-        text = response.text.strip()
-        is_rel = "YES" in re.findall(r"RELEVANT:\s*(YES|NO)", text, re.IGNORECASE)
+        is_rel = "YES" in re.findall(r"RELEVANT:\s*(YES|NO)", response_text, re.IGNORECASE)
         if not is_rel:
             return None
 
-        is_pol = "YES" in re.findall(r"IS_POLITICS:\s*(YES|NO)", text, re.IGNORECASE)
-        score_match = re.search(r"ENGAGEMENT_SCORE:\s*(\d+)", text)
+        is_pol = "YES" in re.findall(r"IS_POLITICS:\s*(YES|NO)", response_text, re.IGNORECASE)
+        score_match = re.search(r"ENGAGEMENT_SCORE:\s*(\d+)", response_text)
         score = int(score_match.group(1)) if score_match else 5
 
         headline = clean_t
         sub_headline = ""
         summary = clean_s
 
-        for line in text.split("\n"):
+        for line in response_text.split("\n"):
             line = line.strip()
             if line.startswith("HEADLINE:"):
                 headline = line.replace("HEADLINE:", "").strip().replace('"', '')
@@ -362,6 +377,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     tail = [(bubble_w - 140, bubble_h - tail_h), (bubble_w - 40, bubble_h), (bubble_w - 40, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
+    # Watermark: #4c0000 with 20% opacity
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
@@ -386,6 +402,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     text_y = 35
     inner_w = bubble_w - (text_pad_x * 2)
 
+    # Headline in bold maroon #4c0000
     hl_lines = wrap_text(headline, font_hl, inner_w, b_draw)
     for line in hl_lines[:3]:
         bbox = b_draw.textbbox((0, 0), line, font=font_hl)
@@ -393,6 +410,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_hl)
         text_y += (bbox[3] - bbox[0]) + 14
 
+    # Sub-headline in bold maroon #4c0000
     if sub_headline:
         text_y += 6
         sub_lines = wrap_text(sub_headline, font_sub, inner_w, b_draw)
@@ -402,6 +420,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_sub)
             text_y += (bbox[3] - bbox[0]) + 10
 
+    # Summary in bold Pure Black #000000
     text_y += 15
     sum_lines = wrap_text(summary, font_sum, inner_w, b_draw)
     for line in sum_lines[:4]:
@@ -412,6 +431,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 
     card.paste(bubble_img, (bubble_x, bubble_y), mask=bubble_img)
 
+    # Footer: Date & Source
     draw = ImageDraw.Draw(card)
     font_footer = get_font(25)
     date_str = datetime.utcnow().strftime("%d %B").upper()
@@ -591,11 +611,10 @@ def publish_article(entry, source_name, img_url, curated):
     return True
 
 def scan_feeds_smart(state):
-    print(f"Smart-scanning {len(ALL_FEEDS)} media feeds...")
+    print(f"Smart-scanning {len(ALL_FEEDS)} media feeds with Dual-AI engine...")
     qualifying_candidates = []
-    
-    # 1. Gather fresh articles with fast pre-filtering (0 API calls)
     prefiltered_entries = []
+
     for feed in ALL_FEEDS:
         try:
             parsed = feedparser.parse(feed["url"])
@@ -611,7 +630,6 @@ def scan_feeds_smart(state):
                 if not quick_bd_relevance_check(clean_t, raw_summary, is_intl):
                     continue
                 
-                # Check for high-res photo first before spending an AI call
                 img_url = extract_high_res_image(entry)
                 if not img_url:
                     continue
@@ -626,13 +644,11 @@ def scan_feeds_smart(state):
         except Exception:
             continue
 
-    print(f"Pre-filter kept {len(prefiltered_entries)} high-probability stories. Beginning Gemini curation...")
+    print(f"Pre-filter kept {len(prefiltered_entries)} high-probability stories. Analyzing with Dual-AI...")
 
-    # 2. Prioritize politics candidate first, then top general stories
     pol_candidates = [e for e in prefiltered_entries if e["is_pol_hint"]]
     gen_candidates = [e for e in prefiltered_entries if not e["is_pol_hint"]]
     
-    # Select up to 2 politics candidates and 4 general candidates to evaluate
     evaluation_queue = pol_candidates[:3] + gen_candidates[:5]
 
     for item in evaluation_queue:
@@ -648,9 +664,7 @@ def scan_feeds_smart(state):
                 "score": curated["score"]
             })
             print(f"Accepted: {curated['headline']} (Score: {curated['score']}, Politics: {curated['is_politics']})")
-        
-        # 12-second delay between AI requests to strictly respect Google's 5 RPM limit
-        time.sleep(12)
+        time.sleep(2)
 
     qualifying_candidates.sort(key=lambda x: x["score"], reverse=True)
     return qualifying_candidates
