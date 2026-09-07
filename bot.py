@@ -90,7 +90,7 @@ def pre_clean_text(text):
 def quick_bd_relevance_check(title, summary, is_international):
     combined = (title + " " + summary).lower()
     if is_international:
-        return any(k in combined for k in ["bangladesh", "dhaka", "hasina", "yunus", "bengali"])
+        return any(k in combined for k in ["bangladesh", "dhaka", "hasina", "yunus", "bengali", "rohingya"])
     return True
 
 def get_live_groq_models():
@@ -109,7 +109,6 @@ ACTIVE_GROQ_MODELS = get_live_groq_models()
 print(f"Active Groq models detected: {ACTIVE_GROQ_MODELS[:4]}", flush=True)
 
 def query_llm_dual_engine(prompt):
-    # 1. Groq
     if groq_client and ACTIVE_GROQ_MODELS:
         for model in ACTIVE_GROQ_MODELS[:3]:
             try:
@@ -126,7 +125,6 @@ def query_llm_dual_engine(prompt):
             except Exception as ge:
                 print(f"Groq {model} error: {ge}", flush=True)
 
-    # 2. Gemini fallback
     if gemini_client:
         for model in ["gemini-3.6-flash", "gemini-3.5-flash"]:
             for attempt in range(2):
@@ -156,25 +154,28 @@ def analyze_and_score_news(raw_title, raw_summary, source_name):
     clean_t = pre_clean_text(raw_title)
     clean_s = pre_clean_text(raw_summary) if raw_summary else clean_t
 
-    prompt = f"""You are the Chief Editorial Strategist for 'Bongo Tribune' (a premier Bangladeshi newspaper).
-Analyze this story:
+    prompt = f"""You are the Chief Editorial Strategist for 'Bongo Tribune', a premier digital news outlet in Bangladesh.
+Evaluate this breaking news story for MAXIMUM AUDIENCE ENGAGEMENT & REACH:
 Source: {source_name}
 Title: {clean_t}
 Summary: {clean_s}
 
-Requirements:
-1. BANGLADESH RELEVANCE: Is this news relevant to Bangladesh? Output YES or NO.
-2. ENGAGEMENT SCORE: Rate public curiosity, debate, or viral reach from 1 to 10.
-3. IS_POLITICS: Is it about Bangladesh politics, government, elections, or court/law? Output YES or NO.
-4. COPYWRITING (Always 100% natural, fluent Bengali):
-   - HEADLINE: Catchy, powerful Bengali headline (max 10-14 words).
-   - SUB_HEADLINE: Contextual Bengali sub-headline (or 'None').
-   - SUMMARY: Exactly 2 clear journalistic sentences in Bengali.
+CRITICAL EDITORIAL CRITERIA:
+1. BANGLADESH FOCUS: Must be directly tied to Bangladesh national interest, people, or diaspora.
+2. VIRAL / ENGAGEMENT SCORING (1 to 10):
+   - Score 8-10: Massive public debate, breaking controversy, major political shock, high emotion, viral interest.
+   - Score 5-7: Important standard news, regular updates, policy changes.
+   - Score 1-4: Routine, boring, press releases, or minor municipal issues.
+3. IS_POLITICS: YES if about national politics, interim government, elections, political party conflicts, high-profile arrests/trials.
+4. COPYWRITING (Always 100% natural journalistic Bengali):
+   - HEADLINE: High-impact, punchy, dramatic Bengali headline (max 10-14 words).
+   - SUB_HEADLINE: Contextual sub-headline (or 'None').
+   - SUMMARY: Exactly 2 crisp sentences summarizing the core development in fluent Bengali.
 
-Format your answer with these labels:
-RELEVANT: YES
+Format output with these exact labels:
+RELEVANT: YES or NO
 IS_POLITICS: YES or NO
-ENGAGEMENT_SCORE: 8
+ENGAGEMENT_SCORE: <integer 1 to 10>
 HEADLINE: <bengali headline>
 SUB_HEADLINE: <bengali sub-headline or None>
 SUMMARY: <bengali summary>"""
@@ -184,11 +185,9 @@ SUMMARY: <bengali summary>"""
         return None
 
     try:
-        # Robust label parsing
         clean_resp = re.sub(r"[*#_`]", "", response_text)
         
         is_intl = any(k in source_name.lower() for k in ["bbc world", "reuters", "ap news", "al jazeera"])
-        is_rel = True
         if is_intl:
             rel_m = re.search(r"RELEVANT:\s*(YES|NO)", clean_resp, re.IGNORECASE)
             if rel_m and "NO" in rel_m.group(1).upper():
@@ -355,7 +354,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     top_h = int(height * 0.60)
     card = Image.new("RGB", (width, height), color="#4c0000")
 
-    # Top 60% with Gaussian blur filler
     rendered_image = False
     try:
         resp = requests.get(image_url, timeout=12, headers=BROWSER_HEADERS)
@@ -381,7 +379,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         fallback_top = Image.new("RGB", (width, top_h), color="#2d0000")
         card.paste(fallback_top, (0, 0))
 
-    # Header Logo
     header_path = get_asset("header_logo")
     if header_path:
         try:
@@ -393,7 +390,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         except Exception:
             pass
 
-    # Floating Chat Bubble
     bubble_w = 880
     bubble_h = 490 if is_square else 560
     bubble_x = (width - bubble_w) // 2
@@ -406,7 +402,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     tail = [(bubble_w - 140, bubble_h - tail_h), (bubble_w - 40, bubble_h), (bubble_w - 40, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
-    # Watermark: #4c0000 with 20% opacity
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
@@ -592,6 +587,10 @@ def publish_article(entry, source_name, img_url, curated):
     print(f"Publishing article (Score {curated.get('score')}): {headline}", flush=True)
     
     fb_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=False)
+    if not fb_card_path:
+        print("Failed to build FB card path.", flush=True)
+        return False
+        
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
     
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
@@ -600,8 +599,12 @@ def publish_article(entry, source_name, img_url, curated):
     fb_res = post_facebook_feed(fb_card_path, post_caption_fb)
     fb_photo_id = fb_res.get("id") if isinstance(fb_res, dict) else None
 
-    if fb_photo_id:
-        post_facebook_comment(fb_photo_id, comment_text_fb)
+    # CRITICAL: Verify Facebook upload actually succeeded
+    if not fb_photo_id:
+        print(f"Facebook upload failed: {fb_res}", flush=True)
+        return False
+
+    post_facebook_comment(fb_photo_id, comment_text_fb)
 
     try:
         post_facebook_story(fb_card_path)
@@ -670,12 +673,12 @@ def scan_feeds_smart(state):
         except Exception:
             continue
 
-    print(f"Pre-filter kept {len(prefiltered_entries)} high-probability stories. Analyzing with Dual-AI...", flush=True)
+    print(f"Pre-filter kept {len(prefiltered_entries)} breaking stories. Analyzing with Dual-AI for VIRAL / ENGAGEMENT potential...", flush=True)
 
     pol_candidates = [e for e in prefiltered_entries if e["is_pol_hint"]]
     gen_candidates = [e for e in prefiltered_entries if not e["is_pol_hint"]]
     
-    evaluation_queue = pol_candidates[:3] + gen_candidates[:5]
+    evaluation_queue = pol_candidates[:4] + gen_candidates[:6]
 
     for item in evaluation_queue:
         entry = item["entry"]
@@ -689,9 +692,10 @@ def scan_feeds_smart(state):
                 "is_politics": curated["is_politics"],
                 "score": curated["score"]
             })
-            print(f"Accepted: {curated['headline']} (Score: {curated['score']}, Politics: {curated['is_politics']})", flush=True)
+            print(f"Evaluated: {curated['headline']} | Score: {curated['score']} | Politics: {curated['is_politics']}", flush=True)
         time.sleep(2)
 
+    # Sort descending by engagement score so the most viral/discussed story is picked first
     qualifying_candidates.sort(key=lambda x: x["score"], reverse=True)
     return qualifying_candidates
 
@@ -706,11 +710,11 @@ def main():
     published_count = 0
     selected_links = set()
 
-    # Slot 1: Politics Priority
+    # Slot 1: Highest Engagement Bangladesh Politics Story
     pol_picks = [c for c in candidates if c["is_politics"]]
     if pol_picks:
         chosen_pol = pol_picks[0]
-        print("Publishing Slot 1 (Politics)...", flush=True)
+        print("Publishing Slot 1 (Top Politics Story)...", flush=True)
         if publish_article(chosen_pol["entry"], chosen_pol["source_name"], chosen_pol["img_url"], chosen_pol["curated"]):
             state["posted_urls"].append(chosen_pol["entry"].link)
             selected_links.add(chosen_pol["entry"].link)
@@ -718,8 +722,8 @@ def main():
             published_count += 1
             time.sleep(20)
 
-    # Slots 2 & 3: High-Engagement Stories
-    print("Publishing General / Viral News...", flush=True)
+    # Slots 2 & 3: Highest Engagement Remaining News (Viral/Major Talking Points)
+    print("Publishing Slots 2 & 3 (Highest Viral / Public Engagement News)...", flush=True)
     for c in candidates:
         if published_count >= 3:
             break
