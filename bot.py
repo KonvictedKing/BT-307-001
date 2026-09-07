@@ -48,8 +48,7 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "bn,en-US;q=0.9,en;q=0.8",
-    "Referer": "https://www.google.com/"
+    "Accept-Language": "bn,en-US;q=0.9,en;q=0.8"
 }
 
 POLITICS_KEYWORDS = [
@@ -82,6 +81,9 @@ def pre_clean_text(text):
     patterns = [r"\[.*?\]", r"\(.*?\)", r"\|.*$"]
     for p in patterns:
         cleaned = re.sub(p, "", cleaned)
+    # Strip common CMS and author metadata residue
+    cleaned = re.sub(r"Photo:.*?(\.|$)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"Author:.*", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
 
 def quick_bd_relevance_check(title, summary, is_international):
@@ -111,8 +113,8 @@ def query_llm_dual_engine(prompt):
                 res = groq_client.chat.completions.create(
                     messages=[{"role": "user", "content": prompt}],
                     model=model,
-                    temperature=0.3,
-                    max_tokens=350,
+                    temperature=0.25,
+                    max_tokens=500,
                 )
                 text = res.choices[0].message.content.strip()
                 text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
@@ -147,31 +149,31 @@ def analyze_and_score_news(raw_title, raw_summary, source_name):
     clean_t = pre_clean_text(raw_title)
     clean_s = pre_clean_text(raw_summary) if raw_summary else clean_t
 
-    prompt = f"""You are the Chief Editorial Strategist for 'Bongo Tribune', a premier digital news outlet in Bangladesh.
-Evaluate this breaking news story for MAXIMUM AUDIENCE ENGAGEMENT & REACH:
+    prompt = f"""You are the Chief Editorial Strategist and Senior Translator for 'Bongo Tribune', a premier digital newspaper in Bangladesh.
+Evaluate this news story:
 Source: {source_name}
 Title: {clean_t}
 Summary: {clean_s}
 
-CRITICAL EDITORIAL CRITERIA:
-1. BANGLADESH FOCUS: Must be directly tied to Bangladesh national interest, people, or diaspora.
-2. VIRAL / ENGAGEMENT SCORING (1 to 10):
-   - Score 8-10: Massive public debate, breaking controversy, major political shock, high emotion, viral interest.
-   - Score 5-7: Important standard news, regular updates, policy changes.
-   - Score 1-4: Routine, boring, press releases, or minor municipal issues.
-3. IS_POLITICS: YES if about national politics, interim government, elections, political party conflicts, high-profile arrests/trials.
-4. COPYWRITING (Always 100% natural journalistic Bengali):
-   - HEADLINE: High-impact, punchy, dramatic Bengali headline (max 10-14 words).
-   - SUB_HEADLINE: Contextual sub-headline (or 'None').
-   - SUMMARY: Exactly 2 crisp sentences summarizing the core development in fluent Bengali.
+STRICT INSTRUCTIONS:
+1. EVERYTHING MUST BE IN 100% FLUENT, AUTHENTIC, JOURNALISTIC BENGALI (বাংলা).
+   - If the input title or summary is in English, you MUST translate and adapt it into standard Bengali news prose.
+   - Do NOT output ANY English sentences in HEADLINE, SUB_HEADLINE, or SUMMARY.
+2. SUMMARY LENGTH:
+   - Provide a rich, detailed, informative summary in exactly 3 to 4 comprehensive Bengali sentences (filling ~40-60 words). Do NOT truncate into 1 short sentence.
+3. VIRAL / ENGAGEMENT SCORING (1 to 10):
+   - Score 8-10: Huge public curiosity, national politics, shocking crime, big inflation/price hike, major sports achievement.
+   - Score 5-7: Standard important news.
+   - Score 1-4: Routine municipal press releases.
+4. IS_POLITICS: YES if about national politics, interim government, elections, political party conflicts, high-profile arrests/trials, state policy.
 
 Format output with these exact labels:
 RELEVANT: YES or NO
 IS_POLITICS: YES or NO
 ENGAGEMENT_SCORE: <integer 1 to 10>
-HEADLINE: <bengali headline>
-SUB_HEADLINE: <bengali sub-headline or None>
-SUMMARY: <bengali summary>"""
+HEADLINE: <বাংলায় মূল শিরোনাম>
+SUB_HEADLINE: <বাংলায় প্রাসঙ্গিক উপ-শিরোনাম অথবা None>
+SUMMARY: <বাংলায় ৩-৪ লাইনের বিস্তারিত সাংবাদিক প্রতিবেদন>"""
 
     response_text = query_llm_dual_engine(prompt)
     if not response_text:
@@ -179,6 +181,7 @@ SUMMARY: <bengali summary>"""
 
     try:
         clean_resp = re.sub(r"[*#_`]", "", response_text)
+        
         is_intl = any(k in source_name.lower() for k in ["bbc world", "reuters", "ap news", "al jazeera"])
         if is_intl:
             rel_m = re.search(r"RELEVANT:\s*(YES|NO)", clean_resp, re.IGNORECASE)
@@ -193,24 +196,25 @@ SUMMARY: <bengali summary>"""
         score_match = re.search(r"ENGAGEMENT_SCORE:\s*(\d+)", clean_resp, re.IGNORECASE)
         score = int(score_match.group(1)) if score_match else 6
 
-        headline = clean_t
+        headline = ""
         sub_headline = ""
-        summary = clean_s
+        summary = ""
 
         for line in clean_resp.split("\n"):
             line = line.strip()
             if re.match(r"^HEADLINE:\s*", line, re.IGNORECASE):
-                hl = re.sub(r"^HEADLINE:\s*", "", line, flags=re.IGNORECASE).strip(' "')
-                if len(hl) > 5:
-                    headline = hl
+                headline = re.sub(r"^HEADLINE:\s*", "", line, flags=re.IGNORECASE).strip(' "')
             elif re.match(r"^SUB_HEADLINE:\s*", line, re.IGNORECASE):
                 sub = re.sub(r"^SUB_HEADLINE:\s*", "", line, flags=re.IGNORECASE).strip(' "')
                 if sub.lower() != "none" and len(sub) > 3:
                     sub_headline = sub
             elif re.match(r"^SUMMARY:\s*", line, re.IGNORECASE):
-                sm = re.sub(r"^SUMMARY:\s*", "", line, flags=re.IGNORECASE).strip(' "')
-                if len(sm) > 10:
-                    summary = sm
+                summary = re.sub(r"^SUMMARY:\s*", "", line, flags=re.IGNORECASE).strip(' "')
+
+        if not headline:
+            headline = clean_t
+        if not summary:
+            summary = clean_s[:250]
 
         return {
             "headline": headline,
@@ -236,13 +240,14 @@ def clean_and_maximize_image_url(url):
 def search_related_news_image(query):
     """Fallback search to retrieve an authentic high-resolution news photo."""
     try:
-        search_term = urllib.parse.quote(f"{query} bangladesh news")
+        clean_query = re.sub(r"[^\w\s]", " ", query)[:70]
+        search_term = urllib.parse.quote(f"{clean_query} news bangladesh")
         url = f"https://html.duckduckgo.com/html/?q={search_term}"
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=8)
         img_candidates = re.findall(r'//external-content\.duckduckgo\.com/iu/\?u=(https?://[^&"\']+)', resp.text)
         for candidate in img_candidates:
             dec = urllib.parse.unquote(candidate)
-            if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in dec.lower() and 'icon' not in dec.lower():
+            if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in dec.lower() and 'icon' not in dec.lower() and 'avatar' not in dec.lower():
                 return dec
     except Exception:
         pass
@@ -250,9 +255,12 @@ def search_related_news_image(query):
 
 def extract_high_res_image(entry):
     headers = dict(BROWSER_HEADERS)
-    headers["Referer"] = urllib.parse.urlsplit(entry.link).scheme + "://" + urllib.parse.urlsplit(entry.link).netloc
-    
-    # 1. Inspect RSS Enclosures / Media Content first
+    try:
+        headers["Referer"] = urllib.parse.urlsplit(entry.link).scheme + "://" + urllib.parse.urlsplit(entry.link).netloc
+    except Exception:
+        pass
+
+    # 1. Inspect RSS Enclosures / Media Content
     if 'media_content' in entry and len(entry.media_content) > 0:
         url = entry.media_content[0].get('url')
         if url and not url.endswith(('.svg', '.gif')):
@@ -263,11 +271,13 @@ def extract_high_res_image(entry):
         if url and not url.endswith(('.svg', '.gif')):
             return clean_and_maximize_image_url(url)
 
-    # 2. Scrape Article HTML OpenGraph & JSON-LD
+    # 2. Comprehensive Scraper (OpenGraph, Twitter, Picture srcset, Figure images)
     try:
         resp = requests.get(entry.link, timeout=9, headers=headers)
         if resp.status_code == 200:
             html = resp.text
+
+            # JSON-LD Structured Data
             json_ld_matches = re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
             for jld in json_ld_matches:
                 try:
@@ -283,25 +293,28 @@ def extract_high_res_image(entry):
                 except Exception:
                     pass
 
+            # Meta patterns
             patterns = [
                 r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\'](https?://[^"\']+)["\']',
                 r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
                 r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']',
                 r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
-                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](https?://[^"\']+)["\']'
+                r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](https?://[^"\']+)["\']',
+                r'<source[^>]+srcset=["\'](https?://[^"\', ]+)["\']',
+                r'<figure[^>]*>.*?<img[^>]+src=["\'](https?://[^"\']+)["\']'
             ]
             for pat in patterns:
-                m = re.search(pat, html, re.IGNORECASE)
+                m = re.search(pat, html, re.DOTALL | re.IGNORECASE)
                 if m:
                     candidate = m.group(1)
-                    if not candidate.endswith(('.svg', '.gif', '.ico')) and 'avatar' not in candidate.lower() and 'logo' not in candidate.lower():
+                    if not candidate.endswith(('.svg', '.gif', '.ico')) and 'avatar' not in candidate.lower() and 'logo' not in candidate.lower() and 'icon' not in candidate.lower():
                         return clean_and_maximize_image_url(candidate)
     except Exception:
         pass
 
-    # 3. Fallback to Related Image Search
-    clean_title = pre_clean_text(entry.title)
-    return search_related_news_image(clean_title)
+    # 3. Smart Search Fallback
+    return search_related_news_image(entry.title)
 
 def ensure_font_downloaded():
     font_file = "HindSiliguri-Bold.ttf"
@@ -363,18 +376,20 @@ def get_asset(base_name):
     return None
 
 def download_image_robust(url):
-    """Reliably downloads high-res images circumventing newspaper anti-bot protection."""
     if not url:
         return None
     session = requests.Session()
     headers = dict(BROWSER_HEADERS)
-    parsed = urllib.parse.urlsplit(url)
-    headers["Host"] = parsed.netloc
-    headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        headers["Host"] = parsed.netloc
+        headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+    except Exception:
+        pass
     
     try:
         resp = session.get(url, timeout=12, headers=headers)
-        if resp.status_code == 200 and len(resp.content) > 4000:
+        if resp.status_code == 200 and len(resp.content) > 3000:
             return Image.open(BytesIO(resp.content)).convert("RGB")
     except Exception:
         pass
@@ -389,9 +404,8 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     # 1. PHOTO RENDERING (Top 62% with Gaussian Blur Ambient Filler)
     raw_img = download_image_robust(image_url)
     if not raw_img:
-        # Fallback to search query
-        query_fallback = search_related_news_image(headline)
-        raw_img = download_image_robust(query_fallback)
+        fallback_query = search_related_news_image(headline)
+        raw_img = download_image_robust(fallback_query)
 
     if raw_img:
         try:
@@ -409,6 +423,11 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             card.paste(bg_blur, (0, 0))
         except Exception as e:
             print(f"Image processing note: {e}", flush=True)
+            fallback_top = Image.new("RGB", (width, top_h), color="#2d0000")
+            card.paste(fallback_top, (0, 0))
+    else:
+        fallback_top = Image.new("RGB", (width, top_h), color="#2d0000")
+        card.paste(fallback_top, (0, 0))
 
     # 2. TOP HEADER LOGO ("Bongo Tribune")
     header_path = get_asset("header_logo")
@@ -422,12 +441,10 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         except Exception:
             pass
 
-    # 3. EXPANDED CHAT BUBBLE (Matches BT NEWS CARD mockup)
+    # 3. EXPANDED CHAT BUBBLE
     bubble_w = 930
-    bubble_h = 560 if is_square else 650
+    bubble_h = 570 if is_square else 660
     bubble_x = (width - bubble_w) // 2
-    
-    # Placed right above the bottom footer labels
     footer_margin = 85
     bubble_y = height - bubble_h - footer_margin
 
@@ -438,7 +455,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     # White Bubble Box
     b_draw.rounded_rectangle([(0, 0), (bubble_w, bubble_h - tail_h)], radius=26, fill=(255, 255, 255, 255))
     
-    # Pointing speech tail placed right above the source
+    # Speech tail pointing down right above the source
     tail = [(bubble_w - 150, bubble_h - tail_h), (bubble_w - 55, bubble_h), (bubble_w - 55, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
@@ -464,35 +481,61 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     font_sum = get_font(28 if not is_square else 24)
 
     text_pad_x = 45
-    text_y = 38
     inner_w = bubble_w - (text_pad_x * 2)
 
-    # Headline: bold maroon #4c0000
-    hl_lines = wrap_text(headline, font_hl, inner_w, b_draw)
-    for line in hl_lines[:3]:
+    # Wrap texts
+    hl_lines = wrap_text(headline, font_hl, inner_w, b_draw)[:3]
+    sub_lines = wrap_text(sub_headline, font_sub, inner_w, b_draw)[:2] if sub_headline else []
+    sum_lines = wrap_text(summary, font_sum, inner_w, b_draw)[:5]
+
+    # Calculate total height of all text elements to center vertically
+    line_spacing_hl = 12
+    line_spacing_sub = 10
+    line_spacing_sum = 8
+    
+    total_text_h = 0
+    for l in hl_lines:
+        bb = b_draw.textbbox((0, 0), l, font=font_hl)
+        total_text_h += (bb[3] - bb[0]) + line_spacing_hl
+    if sub_lines:
+        total_text_h += 6
+        for l in sub_lines:
+            bb = b_draw.textbbox((0, 0), l, font=font_sub)
+            total_text_h += (bb[3] - bb[0]) + line_spacing_sub
+    if sum_lines:
+        total_text_h += 16
+        for l in sum_lines:
+            bb = b_draw.textbbox((0, 0), l, font=font_sum)
+            total_text_h += (bb[3] - bb[0]) + line_spacing_sum
+
+    usable_bubble_h = bubble_h - tail_h
+    start_y = max(30, (usable_bubble_h - total_text_h) // 2)
+
+    # Render Headline in bold maroon #4c0000 (Centered)
+    cur_y = start_y
+    for line in hl_lines:
         bbox = b_draw.textbbox((0, 0), line, font=font_hl)
         line_w = bbox[2] - bbox[0]
-        b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_hl)
-        text_y += (bbox[3] - bbox[0]) + 12
+        b_draw.text((text_pad_x + (inner_w - line_w) // 2, cur_y), line, fill="#4c0000", font=font_hl)
+        cur_y += (bbox[3] - bbox[0]) + line_spacing_hl
 
-    # Sub-headline: bold maroon #4c0000
-    if sub_headline:
-        text_y += 6
-        sub_lines = wrap_text(sub_headline, font_sub, inner_w, b_draw)
-        for line in sub_lines[:2]:
+    # Render Sub-headline in bold maroon #4c0000 (Centered)
+    if sub_lines:
+        cur_y += 6
+        for line in sub_lines:
             bbox = b_draw.textbbox((0, 0), line, font=font_sub)
             line_w = bbox[2] - bbox[0]
-            b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_sub)
-            text_y += (bbox[3] - bbox[0]) + 10
+            b_draw.text((text_pad_x + (inner_w - line_w) // 2, cur_y), line, fill="#4c0000", font=font_sub)
+            cur_y += (bbox[3] - bbox[0]) + line_spacing_sub
 
-    # Summary: bold pure black #000000
-    text_y += 16
-    sum_lines = wrap_text(summary, font_sum, inner_w, b_draw)
-    for line in sum_lines[:4]:
-        bbox = b_draw.textbbox((0, 0), line, font=font_sum)
-        line_w = bbox[2] - bbox[0]
-        b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#000000", font=font_sum)
-        text_y += (bbox[3] - bbox[0]) + 8
+    # Render Summary in bold pure black #000000 (Centered)
+    if sum_lines:
+        cur_y += 16
+        for line in sum_lines:
+            bbox = b_draw.textbbox((0, 0), line, font=font_sum)
+            line_w = bbox[2] - bbox[0]
+            b_draw.text((text_pad_x + (inner_w - line_w) // 2, cur_y), line, fill="#000000", font=font_sum)
+            cur_y += (bbox[3] - bbox[0]) + line_spacing_sum
 
     card.paste(bubble_img, (bubble_x, bubble_y), mask=bubble_img)
 
@@ -502,10 +545,8 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     date_str = datetime.utcnow().strftime("%d %B").upper()
     footer_y = height - 60
     
-    # Left aligned date
     draw.text((60, footer_y), date_str, fill="#ffffff", font=font_footer)
 
-    # Right aligned source
     clean_source = source_name.replace("http://", "").replace("https://", "").replace("www.", "")
     source_str = f"Source : {clean_source}"
     src_bbox = draw.textbbox((0, 0), source_str, font=font_footer)
@@ -585,12 +626,13 @@ def post_facebook_story(image_path):
 
 def wait_for_ig_container(creation_id):
     status_url = f"https://graph.facebook.com/v20.0/{creation_id}?fields=status_code&access_token={ACCESS_TOKEN}"
-    for _ in range(8):
+    for _ in range(12):
         time.sleep(5)
         res = requests.get(status_url).json()
         if res.get("status_code") == "FINISHED":
             return True
         if res.get("status_code") == "ERROR":
+            print(f"IG container processing error: {res}", flush=True)
             return False
     return True
 
@@ -602,6 +644,7 @@ def post_instagram_feed(image_url, caption):
     res = requests.post(create_url, data=payload).json()
     creation_id = res.get("id")
     if not creation_id:
+        print(f"IG create container failed: {res}", flush=True)
         return None
     if wait_for_ig_container(creation_id):
         pub_url = f"https://graph.facebook.com/v20.0/{IG_USER_ID}/media_publish"
@@ -632,10 +675,12 @@ def publish_article(entry, source_name, img_url, curated):
     
     fb_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=False)
     if not fb_card_path:
+        print("Failed to build FB card path.", flush=True)
         return False
         
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
     
+    # Clean concise Bengali caption (NO metadata/raw article dumps)
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
     comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
     
@@ -655,6 +700,7 @@ def publish_article(entry, source_name, img_url, curated):
 
     if IG_USER_ID:
         try:
+            # Upload IG square card as temporary asset to get CDN URL
             temp_res = requests.post(
                 f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
                 files={"source": open(ig_card_path, "rb")},
@@ -686,7 +732,7 @@ def scan_feeds_smart(state):
     qualifying_candidates = []
     prefiltered_entries = []
 
-    # Interleaved round-robin scan across all media channels
+    # Round-robin collection across feeds
     feed_entries_map = {}
     for feed in ALL_FEEDS:
         try:
@@ -716,7 +762,6 @@ def scan_feeds_smart(state):
         except Exception:
             continue
 
-    # Round-robin selection across unique channels to ensure variance
     max_depth = max([len(v) for v in feed_entries_map.values()]) if feed_entries_map else 0
     for depth in range(min(max_depth, 2)):
         for source_name, entries in feed_entries_map.items():
@@ -725,11 +770,8 @@ def scan_feeds_smart(state):
 
     print(f"Pre-filter gathered {len(prefiltered_entries)} varied candidate stories across different newspapers.", flush=True)
 
-    # Evaluate candidates with Dual-AI
     seen_sources = set()
     evaluation_queue = []
-    
-    # Prioritize 1 story per source first
     for e in prefiltered_entries:
         if e["source"] not in seen_sources:
             seen_sources.add(e["source"])
@@ -739,9 +781,9 @@ def scan_feeds_smart(state):
 
     for item in evaluation_queue:
         entry = item["entry"]
-        img_url = extract_high_res_image(entry)
         curated = analyze_and_score_news(entry.title, entry.get("summary", ""), item["source"])
         if curated:
+            img_url = extract_high_res_image(entry)
             qualifying_candidates.append({
                 "entry": entry,
                 "source_name": item["source"],
@@ -784,7 +826,6 @@ def main():
     for c in candidates:
         if published_count >= 3:
             break
-        # Ensure variance: Avoid duplicate sources in the same run
         if c["source_name"] in used_sources and len(used_sources) < len(candidates):
             continue
         if c["entry"].link in state["posted_urls"]:
@@ -797,7 +838,7 @@ def main():
             published_count += 1
             time.sleep(20)
 
-    # If diverse sources ran out, fill remaining slots with next highest scores
+    # Fill remaining slots if diverse sources are exhausted
     if published_count < 3:
         for c in candidates:
             if published_count >= 3:
