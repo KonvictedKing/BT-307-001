@@ -10,7 +10,6 @@ import feedparser
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-# Dual AI Providers
 from groq import Groq
 from google import genai
 
@@ -20,9 +19,7 @@ ACCESS_TOKEN = os.environ.get("FB_ACCESS_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# MASTER NEWS DIRECTORY: BANGLADESH & GLOBAL OUTLETS
 ALL_FEEDS = [
-    # Top Daily Bangla Newspapers
     {"name": "Prothom Alo", "url": "https://www.prothomalo.com/feed"},
     {"name": "Samakal", "url": "https://www.samakal.com/feed"},
     {"name": "Kaler Kantho", "url": "https://www.kalerkantho.com/rss.xml"},
@@ -32,8 +29,6 @@ ALL_FEEDS = [
     {"name": "Daily Naya Diganta", "url": "https://www.dailynayadiganta.com/feed"},
     {"name": "Kalbela", "url": "https://www.kalbela.com/feed"},
     {"name": "Dainik Amader Shomoy", "url": "https://www.dainikamadershomoy.com/feed"},
-
-    # Major Online Portals & TV
     {"name": "BDNews24", "url": "https://bangla.bdnews24.com/rss.xml"},
     {"name": "Banglanews24", "url": "https://www.banglanews24.com/rss/rss.xml"},
     {"name": "Jago News", "url": "https://www.jagonews24.com/rss/rss.xml"},
@@ -42,20 +37,15 @@ ALL_FEEDS = [
     {"name": "Somoy TV", "url": "https://www.somoynews.tv/rss.xml"},
     {"name": "Channel 24", "url": "https://www.channel24bd.tv/rss.xml"},
     {"name": "Jamuna TV", "url": "https://www.jamuna.tv/feed"},
-
-    # English & Business Outlets
     {"name": "The Daily Star", "url": "https://www.thedailystar.net/frontpage/rss.xml"},
     {"name": "Dhaka Tribune", "url": "https://www.dhakatribune.com/feed"},
     {"name": "The Business Standard", "url": "https://www.tbsnews.net/rss.xml"},
-
-    # International Monitoring
     {"name": "BBC World", "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
     {"name": "Reuters", "url": "https://feedx.net/rss/reuters.xml"},
     {"name": "AP News", "url": "https://feedx.net/rss/apnews.xml"},
     {"name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml"}
 ]
 
-# Initialize Clients
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -103,14 +93,27 @@ def quick_bd_relevance_check(title, summary, is_international):
         return any(k in combined for k in ["bangladesh", "dhaka", "hasina", "yunus", "bengali"])
     return True
 
+def get_live_groq_models():
+    """Dynamically fetches models active on your specific Groq key."""
+    if not groq_client:
+        return []
+    try:
+        available = [m.id for m in groq_client.models.list().data if "whisper" not in m.id.lower() and "guard" not in m.id.lower()]
+        # Prioritize text models
+        priority = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.6-27b", "openai/gpt-oss-20b"]
+        sorted_models = [m for m in priority if m in available] + [m for m in available if m not in priority]
+        return sorted_models
+    except Exception as e:
+        print(f"Could not list Groq models: {e}")
+        return []
+
+ACTIVE_GROQ_MODELS = get_live_groq_models()
+print(f"Active Groq models detected: {ACTIVE_GROQ_MODELS[:4]}")
+
 def query_llm_dual_engine(prompt):
-    """
-    Attempts generation with Groq first (high speed & generous limits).
-    Fails over to Gemini if Groq encounters an issue, ensuring zero downtime.
-    """
-    # 1. Try Groq (Fast & high limits)
-    if groq_client:
-        for model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+    # 1. Primary: Groq Active Models
+    if groq_client and ACTIVE_GROQ_MODELS:
+        for model in ACTIVE_GROQ_MODELS[:3]:
             try:
                 res = groq_client.chat.completions.create(
                     messages=[{"role": "user", "content": prompt}],
@@ -123,20 +126,31 @@ def query_llm_dual_engine(prompt):
                 if len(text) > 20:
                     return text
             except Exception as ge:
-                print(f"Groq {model} bypassed: {ge}")
+                print(f"Groq {model} error: {ge}")
 
-    # 2. Fallback to Gemini
+    # 2. Fallback: Gemini with automatic retry on 429
     if gemini_client:
-        for model in ["gemini-2.5-flash", "gemini-3.6-flash"]:
-            try:
-                res = gemini_client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                )
-                if res and res.text and len(res.text.strip()) > 20:
-                    return res.text.strip()
-            except Exception as gme:
-                print(f"Gemini {model} bypassed: {gme}")
+        for model in ["gemini-3.6-flash", "gemini-3.5-flash"]:
+            for attempt in range(2):
+                try:
+                    res = gemini_client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                    )
+                    if res and res.text and len(res.text.strip()) > 20:
+                        return res.text.strip()
+                except Exception as gme:
+                    err_msg = str(gme)
+                    if "429" in err_msg and attempt == 0:
+                        wait_sec = 21
+                        m = re.search(r"retry in (\d+)", err_msg)
+                        if m:
+                            wait_sec = int(m.group(1)) + 1
+                        print(f"Gemini quota cooldown: waiting {wait_sec}s...")
+                        time.sleep(wait_sec)
+                    else:
+                        print(f"Gemini {model} error: {gme}")
+                        break
 
     return None
 
@@ -331,14 +345,11 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     top_h = int(height * 0.60)
     card = Image.new("RGB", (width, height), color="#4c0000")
 
+    # 1. TOP 60% IMAGE WITH GAUSSIAN BLUR FILLER
     try:
         resp = requests.get(image_url, timeout=12, headers=BROWSER_HEADERS)
-        if resp.status_code != 200:
-            return None
         raw_img = Image.open(BytesIO(resp.content)).convert("RGB")
-        if raw_img.width < 350 or raw_img.height < 200:
-            return None
-
+        
         bg_blur = raw_img.resize((width, top_h), Image.Resampling.BILINEAR)
         bg_blur = bg_blur.filter(ImageFilter.GaussianBlur(radius=35))
 
@@ -351,9 +362,12 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         paste_y = (top_h - new_h) // 2
         bg_blur.paste(fit_img, (paste_x, paste_y))
         card.paste(bg_blur, (0, 0))
-    except Exception:
-        return None
+    except Exception as img_err:
+        print(f"Photo render error: {img_err}. Using ambient color gradient.")
+        fallback_top = Image.new("RGB", (width, top_h), color="#2d0000")
+        card.paste(fallback_top, (0, 0))
 
+    # 2. HEADER LOGO
     header_path = get_asset("header_logo")
     if header_path:
         try:
@@ -365,6 +379,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         except Exception:
             pass
 
+    # 3. FLOATING CHAT BUBBLE
     bubble_w = 880
     bubble_h = 490 if is_square else 560
     bubble_x = (width - bubble_w) // 2
@@ -377,7 +392,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     tail = [(bubble_w - 140, bubble_h - tail_h), (bubble_w - 40, bubble_h), (bubble_w - 40, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
-    # Watermark: #4c0000 with 20% opacity
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
@@ -391,8 +405,8 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             wm_x = (bubble_w - wm_size) // 2
             wm_y = (bubble_h - tail_h - wm_size) // 2
             bubble_img.paste(tinted_wm, (wm_x, wm_y), mask=tinted_wm)
-        except Exception as e:
-            print(f"Watermark paste error: {e}")
+        except Exception:
+            pass
 
     font_hl = get_font(42 if not is_square else 36)
     font_sub = get_font(30 if not is_square else 26)
@@ -402,7 +416,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     text_y = 35
     inner_w = bubble_w - (text_pad_x * 2)
 
-    # Headline in bold maroon #4c0000
     hl_lines = wrap_text(headline, font_hl, inner_w, b_draw)
     for line in hl_lines[:3]:
         bbox = b_draw.textbbox((0, 0), line, font=font_hl)
@@ -410,7 +423,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_hl)
         text_y += (bbox[3] - bbox[0]) + 14
 
-    # Sub-headline in bold maroon #4c0000
     if sub_headline:
         text_y += 6
         sub_lines = wrap_text(sub_headline, font_sub, inner_w, b_draw)
@@ -420,7 +432,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             b_draw.text((text_pad_x + (inner_w - line_w) // 2, text_y), line, fill="#4c0000", font=font_sub)
             text_y += (bbox[3] - bbox[0]) + 10
 
-    # Summary in bold Pure Black #000000
     text_y += 15
     sum_lines = wrap_text(summary, font_sum, inner_w, b_draw)
     for line in sum_lines[:4]:
@@ -431,7 +442,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 
     card.paste(bubble_img, (bubble_x, bubble_y), mask=bubble_img)
 
-    # Footer: Date & Source
     draw = ImageDraw.Draw(card)
     font_footer = get_font(25)
     date_str = datetime.utcnow().strftime("%d %B").upper()
@@ -564,6 +574,7 @@ def publish_article(entry, source_name, img_url, curated):
     
     fb_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=False)
     if not fb_card_path:
+        print("Failed to create FB card path.")
         return False
         
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
