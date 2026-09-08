@@ -273,7 +273,7 @@ def search_related_news_image(query):
         encoded = urllib.parse.quote(f"{clean_q} news bangladesh")
         url = f"https://html.duckduckgo.com/html/?q={encoded}"
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6)
-        candidates = re.findall(r'//external-content\.duckduckgo.com/iu/\?u=(https?://[^&"\']+)', resp.text)
+        candidates = re.findall(r'//external-content\.duckduckgo\.com/iu/\?u=(https?://[^&"\']+)', resp.text)
         for cand in candidates:
             dec = urllib.parse.unquote(cand)
             if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in dec.lower() and 'icon' not in dec.lower():
@@ -302,9 +302,7 @@ def extract_high_res_image(entry):
                 r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
                 r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']',
                 r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
-                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](https?://[^"\']+)["\']',
-                r'<source[^>]+srcset=["\'](https?://[^"\', ]+)["\']',
-                r'<figure[^>]*>.*?<img[^>]+src=["\'](https?://[^"\']+)["\']'
+                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](https?://[^"\']+)["\']'
             ]
             for pat in patterns:
                 m = re.search(pat, html, re.DOTALL | re.IGNORECASE)
@@ -577,12 +575,13 @@ def build_instagram_story(feed_card_path):
     draw_mask.rounded_rectangle([(0, 0), (target_card_w, target_card_w)], radius=radius, fill=255)
 
     card_x = (story_w - target_card_w) // 2
-    card_y = (story_h - target_card_w) // 2 - 50
+    card_y = (story_h - target_card_w) // 2 - 100
     bg.paste(scaled_card, (card_x, card_y), mask)
 
     draw = ImageDraw.Draw(bg)
     handle_font = get_font(34)
-    draw.text((card_x + 10, card_y + target_card_w + 30), "@bongo.tribune", fill="#ffffff", font=handle_font)
+    handle_w = draw.textbbox((0, 0), "@bongo.tribune", font=handle_font)[2]
+    draw.text(((story_w - handle_w) // 2, card_y + target_card_w + 40), "@bongo.tribune", fill="#ffffff", font=handle_font)
 
     story_path = "final_story_ig.jpg"
     bg.save(story_path, "JPEG", quality=95)
@@ -821,7 +820,6 @@ def main():
     selected_posts = []
 
     pools = [(1, tier_1), (2, tier_2), (3, tier_3)]
-    
     for tier_num, pool in pools:
         for c in pool:
             if c["source_name"] not in used_sources and c["entry"].link not in state["posted_urls"]:
@@ -829,10 +827,9 @@ def main():
                 used_sources.add(c["source_name"])
                 break
 
-    # Relaxed Fallback: Guarantee 3 distinct posts even if a tier pool is missing in the current batch
+    # Relaxed Fallback: Guarantee up to 3 distinct posts from unused sources if pools are short
     if len(selected_posts) < 3:
-        all_remaining = tier_1 + tier_2 + tier_3
-        all_remaining.sort(key=lambda x: x["score"], reverse=True)
+        all_remaining = sorted(candidates, key=lambda x: x["score"], reverse=True)
         for c in all_remaining:
             if len(selected_posts) >= 3:
                 break
