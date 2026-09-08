@@ -48,6 +48,12 @@ BROWSER_HEADERS = {
     "Accept-Language": "bn,en-US;q=0.9,en;q=0.8"
 }
 
+POLITICS_KEYWORDS = [
+    "সরকার", "রাজনৈতিক", "নির্বাচন", "উপদেষ্টা", "আওয়ামী", "বিএনপি", "জামায়াত", "সংসদ", "আইন", 
+    "আদালত", "মামলা", "গ্রেফতার", "পুলিশ", "সেনাবাহিনী", "রিমান্ড", "politics", "political", 
+    "election", "government", "adviser", "bnp", "awami", "court", "arrest", "minister", "parliament"
+]
+
 def load_state():
     state = {"posted_urls": []}
     if os.path.exists("posted_urls.json"):
@@ -198,7 +204,6 @@ CRITICAL RULES:
         if score_m:
             score = int(score_m.group(1))
 
-        # Fallback if delimiters were omitted
         if not headline or not summary:
             for line in clean_resp.split("\n"):
                 line = line.strip()
@@ -207,11 +212,9 @@ CRITICAL RULES:
                 elif not summary and len(line) > 20 and line != headline:
                     summary = line
 
-        # Strip any stray tags
         headline = re.sub(r"(?:IS_?POLITICS|ENGAGEMENT|SCORE|###)[\s\S]*", "", headline, flags=re.IGNORECASE).strip()
         summary = re.sub(r"(?:IS_?POLITICS|ENGAGEMENT|SCORE|###)[\s\S]*", "", summary, flags=re.IGNORECASE).strip()
 
-        # Language Guard: Force Bengali if source was English
         if is_mostly_english(headline):
             headline = force_translate_to_bangla(headline)
         if sub_headline and is_mostly_english(sub_headline):
@@ -219,14 +222,13 @@ CRITICAL RULES:
         if is_mostly_english(summary):
             summary = force_translate_to_bangla(summary)
 
-        # Ensure sentence completion
         summary = summary.strip()
         if summary and not summary.endswith(('।', '.', '!', '?')):
             last_punc = max(summary.rfind('।'), summary.rfind('.'))
             if last_punc > 20:
                 summary = summary[:last_punc + 1]
             else:
-                summary += '।'
+                summary += '।':
 
         if not headline or len(headline) < 5:
             headline = force_translate_to_bangla(clean_t)
@@ -404,7 +406,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     # Base card: Lower 40% strictly locked to maroon #4c0000 (RGB: 76, 0, 0)
     card = Image.new("RGB", (width, height), color=(76, 0, 0))
 
-    # 1. TOP 60% PHOTO WITH GAUSSIAN BLUR FILLER
+    # 1. PHOTO (Top 60% with Gaussian Blur Ambient Fill)
     raw_img = download_image_robust(image_url, fallback_query=headline)
     if raw_img:
         try:
@@ -729,15 +731,14 @@ def publish_article(entry, source_name, img_url, curated):
 def scan_feeds_smart(state):
     print(f"Smart-scanning {len(ALL_FEEDS)} media feeds with Dual-AI engine...", flush=True)
     qualifying_candidates = []
-    prefiltered_entries = []
-
     feed_entries_map = {}
+
     for feed in ALL_FEEDS:
         try:
             parsed = feedparser.parse(feed["url"])
             valid_for_this_feed = []
 
-            for entry in parsed.entries[:6]:
+            for entry in parsed.entries[:10]:
                 if entry.link in state["posted_urls"]:
                     continue
                 clean_t = pre_clean_text(entry.title)
@@ -755,19 +756,16 @@ def scan_feeds_smart(state):
         except Exception:
             continue
 
+    # Sample round-robin across feeds to guarantee variance
+    evaluation_queue = []
     max_depth = max([len(v) for v in feed_entries_map.values()]) if feed_entries_map else 0
-    for depth in range(min(max_depth, 2)):
+    for depth in range(min(max_depth, 4)):
         for source_name, entries in feed_entries_map.items():
             if depth < len(entries):
-                prefiltered_entries.append(entries[depth])
-
-    seen_sources = set()
-    evaluation_queue = []
-    for e in prefiltered_entries:
-        if e["source"] not in seen_sources:
-            seen_sources.add(e["source"])
-            evaluation_queue.append(e)
-        if len(evaluation_queue) >= 10:
+                evaluation_queue.append(entries[depth])
+            if len(evaluation_queue) >= 15:
+                break
+        if len(evaluation_queue) >= 15:
             break
 
     for item in evaluation_queue:
@@ -799,8 +797,7 @@ def main():
     published_count = 0
     used_sources = set()
 
-    # Publish top 3 nationwide engaging stories across different outlets
-    print("Publishing Top 3 Nationwide Engaging Stories...", flush=True)
+    # Priority Loop: Post up to 3 stories with source diversity
     for c in candidates:
         if published_count >= 3:
             break
@@ -816,6 +813,7 @@ def main():
             published_count += 1
             time.sleep(15)
 
+    # Fallback Loop: Fill remaining slots if sources run short
     if published_count < 3:
         for c in candidates:
             if published_count >= 3:
