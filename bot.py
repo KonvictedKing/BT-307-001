@@ -589,7 +589,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 def build_facebook_story_canvas(fb_card_path):
     story_w, story_h = 1080, 1920
     
-    # EXACT BACKGROUND ASSET: Load background_base.png for Facebook Stories to match your maroon branding exactly
     bg_path = get_asset("background_base")
     if bg_path:
         try:
@@ -601,7 +600,6 @@ def build_facebook_story_canvas(fb_card_path):
 
     feed_card = Image.open(fb_card_path).convert("RGB")
     target_card_w = int(story_w * 0.88)
-    # Scale based on the 1080x1350 card aspect ratio
     target_card_h = int(target_card_w * (1350 / 1080))
     scaled_card = feed_card.resize((target_card_w, target_card_h), Image.Resampling.LANCZOS)
 
@@ -626,7 +624,6 @@ def build_facebook_story_canvas(fb_card_path):
 def build_instagram_story_canvas(image_url, feed_card_path, headline):
     story_w, story_h = 1080, 1920
     
-    # Gaussian-blurred ambient background for Instagram Stories
     raw_img = download_image_robust(image_url, fallback_query=headline)
     if raw_img:
         bg = raw_img.resize((story_w, story_h), Image.Resampling.BILINEAR)
@@ -691,10 +688,10 @@ def post_facebook_comment(target_id, message):
         print(f"FB Comment error: {e}", flush=True)
         return None
 
-def post_facebook_story(story_image_path):
+def post_facebook_story(story_image_url):
     url = f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos"
     payload = {"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
-    with open(story_image_path, "rb") as f:
+    with open(story_image_url, "rb") as f:
         res = requests.post(url, files={"source": f}, data=payload).json()
         photo_id = res.get("id")
         if photo_id:
@@ -758,10 +755,10 @@ def publish_article(entry, source_name, img_url, curated):
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
 
-    # Build Facebook Story canvas using the Canva background asset
+    # Build Facebook Story Canvas (Maroon background asset layout)
     fb_story_canvas_path = build_facebook_story_canvas(fb_card_path)
 
-    # Build Instagram blurred story canvas
+    # Build Instagram Blurred Story Canvas
     ig_story_path = build_instagram_story_canvas(img_url, ig_card_path, headline)
 
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
@@ -776,7 +773,7 @@ def publish_article(entry, source_name, img_url, curated):
 
     post_facebook_comment(fb_photo_id, comment_text_fb)
 
-    # FACEBOOK STORY: Uploads the custom maroon background vertical story
+    # FACEBOOK STORY: Correctly upload local file path via CDN
     try:
         temp_fb_story = requests.post(
             f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
@@ -931,7 +928,8 @@ def main():
             state["posted_urls"].append(c["entry"].link)
             save_state(state)
             published_count += 1
-            time.sleep(15)
+            # Increased sleep buffer to 25 seconds between posts to prevent API rate-limiting limits
+            time.sleep(25)
 
     print(f"Cycle completed. Articles published: {published_count}", flush=True)
 
