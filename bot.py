@@ -44,7 +44,7 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "bn,en-US;q=0.9,en;q=0.8"
 }
 
@@ -228,7 +228,7 @@ CRITICAL RULES:
             if last_punc > 20:
                 summary = summary[:last_punc + 1]
             else:
-                summary += '।':
+                summary += '।'
 
         if not headline or len(headline) < 5:
             headline = force_translate_to_bangla(clean_t)
@@ -681,7 +681,7 @@ def publish_article(entry, source_name, img_url, curated):
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
 
-    # Facebook Caption: Bengali Headline + Complete Summary + Link Prompt
+    # Facebook Caption: Headline + Clean Summary + Link Prompt
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
     comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
 
@@ -756,7 +756,6 @@ def scan_feeds_smart(state):
         except Exception:
             continue
 
-    # Sample round-robin across feeds to guarantee variance
     evaluation_queue = []
     max_depth = max([len(v) for v in feed_entries_map.values()]) if feed_entries_map else 0
     for depth in range(min(max_depth, 4)):
@@ -797,7 +796,6 @@ def main():
     published_count = 0
     used_sources = set()
 
-    # Priority Loop: Post up to 3 stories with source diversity
     for c in candidates:
         if published_count >= 3:
             break
@@ -813,7 +811,6 @@ def main():
             published_count += 1
             time.sleep(15)
 
-    # Fallback Loop: Fill remaining slots if sources run short
     if published_count < 3:
         for c in candidates:
             if published_count >= 3:
