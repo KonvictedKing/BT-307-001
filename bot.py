@@ -82,12 +82,18 @@ def pre_clean_text(text):
     cleaned = re.sub(r"Author:.*", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
 
+def quick_bd_relevance_check(title, summary, is_international):
+    combined = (title + " " + summary).lower()
+    if is_international:
+        return any(k in combined for k in ["bangladesh", "dhaka", "hasina", "yunus", "bengali", "rohingya"])
+    return True
+
 def get_live_groq_models():
     if not groq_client:
         return []
     try:
         available = [m.id for m in groq_client.models.list().data if "whisper" not in m.id.lower() and "guard" not in m.id.lower()]
-        priority = ["qwen/qwen3.6-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+        priority = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.6-27b", "openai/gpt-oss-20b"]
         sorted_models = [m for m in priority if m in available] + [m for m in available if m not in priority]
         return sorted_models
     except Exception as e:
@@ -95,6 +101,7 @@ def get_live_groq_models():
         return []
 
 ACTIVE_GROQ_MODELS = get_live_groq_models()
+print(f"Active Groq models detected: {ACTIVE_GROQ_MODELS[:4]}", flush=True)
 
 def is_mostly_english(text):
     if not text:
@@ -126,17 +133,22 @@ def query_llm_dual_engine(prompt):
 
     if gemini_client:
         for model in ["gemini-3.6-flash", "gemini-3.5-flash"]:
-            try:
-                res = gemini_client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                )
-                if res and res.text:
-                    clean = re.sub(r"<think>[\s\S]*?</think>", "", res.text, flags=re.IGNORECASE).strip()
-                    if len(clean) > 20:
-                        return clean
-            except Exception:
-                break
+            for attempt in range(2):
+                try:
+                    res = gemini_client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                    )
+                    if res and res.text:
+                        clean = re.sub(r"<think>[\s\S]*?</think>", "", res.text, flags=re.IGNORECASE).strip()
+                        if len(clean) > 20:
+                            return clean
+                except Exception as gme:
+                    err_msg = str(gme)
+                    if "429" in err_msg and attempt == 0:
+                        time.sleep(20)
+                    else:
+                        break
     return None
 
 def force_translate_to_bangla(text):
@@ -403,10 +415,17 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     height = 1080 if is_square else 1350
     top_h = int(height * 0.60)  # Top 60% strictly for photo
 
-    # Base card: Lower 40% strictly locked to maroon #4c0000 (RGB: 76, 0, 0)
-    card = Image.new("RGB", (width, height), color=(76, 0, 0))
+    # Load custom Canva maroon base asset (`background_base.png`)
+    bg_path = get_asset("background_base")
+    if bg_path:
+        try:
+            card = Image.open(bg_path).convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+        except Exception:
+            card = Image.new("RGB", (width, height), color=(76, 0, 0))
+    else:
+        card = Image.new("RGB", (width, height), color=(76, 0, 0))
 
-    # 1. PHOTO (Top 60% with Gaussian Blur Ambient Fill)
+    # 1. TOP 60% PHOTO WITH GAUSSIAN BLUR FILLER
     raw_img = download_image_robust(image_url, fallback_query=headline)
     if raw_img:
         try:
@@ -455,7 +474,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     tail = [(bubble_w - 150, bubble_h - tail_h), (bubble_w - 55, bubble_h), (bubble_w - 55, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
-    # Watermark Seal: subtle 10% alpha background tint
+    # WATERMARK: Preserves original built-in colors with 15% opacity blend
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
@@ -463,13 +482,13 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             wm_size = int(bubble_h * 0.65)
             wm = wm.resize((wm_size, wm_size), Image.Resampling.LANCZOS)
             r, g, b, a = wm.split()
-            subtle_alpha = a.point(lambda p: int(p * 0.10))
+            subtle_alpha = a.point(lambda p: int(p * 0.15))
             tinted_wm = Image.merge("RGBA", (r, g, b, subtle_alpha))
             wm_x = (bubble_w - wm_size) // 2
             wm_y = (bubble_h - tail_h - wm_size) // 2
             bubble_img.paste(tinted_wm, (wm_x, wm_y), mask=tinted_wm)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Watermark note: {e}", flush=True)
 
     font_hl = get_font(44 if not is_square else 36)
     font_sub = get_font(30 if not is_square else 25)
@@ -677,6 +696,7 @@ def publish_article(entry, source_name, img_url, curated):
 
     fb_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=False)
     if not fb_card_path:
+        print("Failed to build FB card path.", flush=True)
         return False
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
@@ -819,6 +839,7 @@ def main():
                 continue
             if publish_article(c["entry"], c["source_name"], c["img_url"], c["curated"]):
                 state["posted_urls"].append(c["entry"].link)
+                used_sources.add(c["source_name"])
                 save_state(state)
                 published_count += 1
                 time.sleep(15)
