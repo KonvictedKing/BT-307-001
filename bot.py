@@ -20,8 +20,8 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 ALL_FEEDS = [
-    {"name": "The Daily Star", "url": "https://www.thedailystar.net/frontpage/rss.xml"},
     {"name": "Prothom Alo", "url": "https://www.prothomalo.com/feed"},
+    {"name": "The Daily Star", "url": "https://www.thedailystar.net/frontpage/rss.xml"},
     {"name": "The Business Standard", "url": "https://www.tbsnews.net/rss.xml"},
     {"name": "Samakal", "url": "https://www.samakal.com/feed"},
     {"name": "BBC Bangla", "url": "https://feeds.bbci.co.uk/bengali/rss.xml"},
@@ -82,12 +82,6 @@ def pre_clean_text(text):
     cleaned = re.sub(r"Author:.*", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
 
-def quick_bd_relevance_check(title, summary, is_international):
-    combined = (title + " " + summary).lower()
-    if is_international:
-        return any(k in combined for k in ["bangladesh", "dhaka", "hasina", "yunus", "bengali", "rohingya"])
-    return True
-
 def get_live_groq_models():
     if not groq_client:
         return []
@@ -101,7 +95,6 @@ def get_live_groq_models():
         return []
 
 ACTIVE_GROQ_MODELS = get_live_groq_models()
-print(f"Active Groq models detected: {ACTIVE_GROQ_MODELS[:4]}", flush=True)
 
 def is_mostly_english(text):
     if not text:
@@ -112,11 +105,11 @@ def is_mostly_english(text):
 
 def query_llm_dual_engine(prompt):
     if groq_client and ACTIVE_GROQ_MODELS:
-        for model in ACTIVE_GROQ_MODELS[:3]:
+        for model in ACTIVE_GROQ_MODELS[:2]:
             try:
                 res = groq_client.chat.completions.create(
                     messages=[
-                        {"role": "system", "content": "You are the Senior Bangla News Editor of Bongo Tribune. You write 100% in fluent, professional, journalistic Bengali (বাংলা). Never output English or internal thoughts."},
+                        {"role": "system", "content": "You are the Senior Bangla News Editor of Bongo Tribune. You write 100% in fluent, professional, journalistic Bengali (বাংলা). Never output English or internal thoughts. Strict Bangladesh focus."},
                         {"role": "user", "content": prompt}
                     ],
                     model=model,
@@ -133,28 +126,23 @@ def query_llm_dual_engine(prompt):
 
     if gemini_client:
         for model in ["gemini-3.6-flash", "gemini-3.5-flash"]:
-            for attempt in range(2):
-                try:
-                    res = gemini_client.models.generate_content(
-                        model=model,
-                        contents=prompt,
-                    )
-                    if res and res.text:
-                        clean = re.sub(r"<think>[\s\S]*?</think>", "", res.text, flags=re.IGNORECASE).strip()
-                        if len(clean) > 20:
-                            return clean
-                except Exception as gme:
-                    err_msg = str(gme)
-                    if "429" in err_msg and attempt == 0:
-                        time.sleep(20)
-                    else:
-                        break
+            try:
+                res = gemini_client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                )
+                if res and res.text:
+                    clean = re.sub(r"<think>[\s\S]*?</think>", "", res.text, flags=re.IGNORECASE).strip()
+                    if len(clean) > 20:
+                        return clean
+            except Exception:
+                break
     return None
 
 def force_translate_to_bangla(text):
     if not text or not is_mostly_english(text):
         return text
-    prompt = f"Translate the following news text strictly into formal journalistic Bengali. Do NOT add notes or English:\n\n{text}"
+    prompt = f"Translate the following news text strictly into formal journalistic Bengali (Bangladesh focus). Do NOT add notes or English:\n\n{text}"
     translated = query_llm_dual_engine(prompt)
     if translated and not is_mostly_english(translated):
         return re.sub(r"[*#_`]", "", translated).strip(' "')
@@ -169,13 +157,18 @@ Title: {clean_t}
 Summary: {clean_s}
 
 You are the Chief News Editor of Bongo Tribune.
-Select this nationwide Bangladesh story (politics, economy, crime, social debate, sports, national life).
+Select this nationwide Bangladesh story (politics, economy, crime, social debate, sports, national life) and classify its editorial priority tier:
+- Tier 1: Alert Triggers (Breaking, urgent crime, major court rulings, critical national policy, severe incidents)
+- Tier 2: Standard Desk (Economy, governance, public affairs, standard national news)
+- Tier 3: Soft News (Culture, features, lifestyle, general sports)
 
 CRITICAL RULES:
 1. Output MUST be 100% in fluent journalistic BENGALI (বাংলা). Zero English characters. Translate all English news into high-impact Bengali.
 2. Provide a 3 to 4 complete sentence Bengali summary (45 to 60 words). Never cut off mid-sentence.
 3. Output format must use these exact delimiters:
 
+###TIER###
+<1 or 2 or 3>
 ###HEADLINE###
 <বাংলায় আকর্ষণীয় শিরোনাম>
 ###SUBHEADLINE###
@@ -193,10 +186,15 @@ CRITICAL RULES:
         clean_resp = re.sub(r"<think>[\s\S]*?</think>", "", response_text, flags=re.IGNORECASE)
         clean_resp = re.sub(r"<think>[\s\S]*", "", clean_resp, flags=re.IGNORECASE).strip()
 
+        tier = 2
         headline = ""
         sub_headline = ""
         summary = ""
         score = 7
+
+        tier_m = re.search(r"###TIER###\s*([123])", clean_resp)
+        if tier_m:
+            tier = int(tier_m.group(1))
 
         hl_m = re.search(r"###HEADLINE###\s*([\s\S]*?)(?=###SUBHEADLINE###|$)", clean_resp)
         if hl_m:
@@ -248,6 +246,7 @@ CRITICAL RULES:
             summary = force_translate_to_bangla(clean_s[:250])
 
         return {
+            "tier": tier,
             "headline": headline,
             "sub_headline": sub_headline,
             "summary": summary,
@@ -413,9 +412,8 @@ def download_image_robust(url, fallback_query=""):
 def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is_square=False):
     width = 1080
     height = 1080 if is_square else 1350
-    top_h = int(height * 0.60)  # Top 60% strictly for photo
+    top_h = int(height * 0.60)  # Top 60% photo, Bottom 40% Canva maroon background
 
-    # Load custom Canva maroon base asset (`background_base.png`)
     bg_path = get_asset("background_base")
     if bg_path:
         try:
@@ -474,7 +472,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     tail = [(bubble_w - 150, bubble_h - tail_h), (bubble_w - 55, bubble_h), (bubble_w - 55, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
-    # WATERMARK: Preserves original built-in colors with 15% opacity blend
+    # WATERMARK: Maintained at exactly 10% transparency (0.10)
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
@@ -482,7 +480,7 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             wm_size = int(bubble_h * 0.65)
             wm = wm.resize((wm_size, wm_size), Image.Resampling.LANCZOS)
             r, g, b, a = wm.split()
-            subtle_alpha = a.point(lambda p: int(p * 0.15))
+            subtle_alpha = a.point(lambda p: int(p * 0.10))
             tinted_wm = Image.merge("RGBA", (r, g, b, subtle_alpha))
             wm_x = (bubble_w - wm_size) // 2
             wm_y = (bubble_h - tail_h - wm_size) // 2
@@ -749,61 +747,36 @@ def publish_article(entry, source_name, img_url, curated):
     return True
 
 def scan_feeds_smart(state):
-    print(f"Smart-scanning {len(ALL_FEEDS)} media feeds with Dual-AI engine...", flush=True)
-    qualifying_candidates = []
-    feed_entries_map = {}
+    print(f"Smart-scanning {len(ALL_FEEDS)} media feeds with Editorial Priority Tiers...", flush=True)
+    all_evaluated = []
 
     for feed in ALL_FEEDS:
         try:
             parsed = feedparser.parse(feed["url"])
-            valid_for_this_feed = []
-
-            for entry in parsed.entries[:10]:
+            for entry in parsed.entries[:6]:
                 if entry.link in state["posted_urls"]:
                     continue
                 clean_t = pre_clean_text(entry.title)
                 if len(clean_t.split()) < 3:
                     continue
 
-                raw_summary = entry.get("summary", "")
-                valid_for_this_feed.append({
-                    "entry": entry,
-                    "source": feed["name"],
-                    "raw_summary": raw_summary
-                })
-            if valid_for_this_feed:
-                feed_entries_map[feed["name"]] = valid_for_this_feed
+                curated = analyze_and_score_news(entry.title, entry.get("summary", ""), feed["name"])
+                if curated:
+                    img_url = extract_high_res_image(entry)
+                    all_evaluated.append({
+                        "entry": entry,
+                        "source_name": feed["name"],
+                        "img_url": img_url,
+                        "curated": curated,
+                        "tier": curated["tier"],
+                        "score": curated["score"]
+                    })
+                    print(f"Evaluated: [{feed['name']}] [Tier {curated['tier']}] {curated['headline']} | Score: {curated['score']}", flush=True)
+                time.sleep(0.5)
         except Exception:
             continue
 
-    evaluation_queue = []
-    max_depth = max([len(v) for v in feed_entries_map.values()]) if feed_entries_map else 0
-    for depth in range(min(max_depth, 4)):
-        for source_name, entries in feed_entries_map.items():
-            if depth < len(entries):
-                evaluation_queue.append(entries[depth])
-            if len(evaluation_queue) >= 15:
-                break
-        if len(evaluation_queue) >= 15:
-            break
-
-    for item in evaluation_queue:
-        entry = item["entry"]
-        curated = analyze_and_score_news(entry.title, item["raw_summary"], item["source"])
-        if curated:
-            img_url = extract_high_res_image(entry)
-            qualifying_candidates.append({
-                "entry": entry,
-                "source_name": item["source"],
-                "img_url": img_url,
-                "curated": curated,
-                "score": curated["score"]
-            })
-            print(f"Evaluated: [{item['source']}] {curated['headline']} | Score: {curated['score']}", flush=True)
-        time.sleep(1)
-
-    qualifying_candidates.sort(key=lambda x: x["score"], reverse=True)
-    return qualifying_candidates
+    return all_evaluated
 
 def main():
     state = load_state()
@@ -816,9 +789,35 @@ def main():
     published_count = 0
     used_sources = set()
 
-    for c in candidates:
+    # Sort and group by Editorial Priority Tiers (1 = Alert Triggers, 2 = Standard Desk, 3 = Soft News)
+    tier_1 = [c for c in candidates if c["tier"] == 1]
+    tier_2 = [c for c in candidates if c["tier"] == 2]
+    tier_3 = [c for c in candidates if c["tier"] == 3]
+
+    # Sort each tier by engagement score descending
+    tier_1.sort(key=lambda x: x["score"], reverse=True)
+    tier_2.sort(key=lambda x: x["score"], reverse=True)
+    tier_3.sort(key=lambda x: x["score"], reverse=True)
+
+    ordered_targets = []
+    if tier_1:
+        ordered_targets.append(tier_1[0])  # Slot 1: Alert Trigger
+    if tier_2:
+        ordered_targets.append(tier_2[0])  # Slot 2: Standard Desk
+    if tier_3:
+        ordered_targets.append(tier_3[0])  # Slot 3: Soft News
+
+    # Fill remaining slots from any tier if needed to reach 3 total posts
+    remaining = [c for c in (tier_1 + tier_2 + tier_3) if c not in ordered_targets]
+    remaining.sort(key=lambda x: x["score"], reverse=True)
+    ordered_targets.extend(remaining)
+
+    print(f"Publishing according to Editorial Priority Tiers (1, 2, 3) with source cycling...", flush=True)
+
+    for c in ordered_targets:
         if published_count >= 3:
             break
+        # Source cycling check: Avoid repeating sources in the same cycle if possible
         if c["source_name"] in used_sources and len(used_sources) < len(candidates):
             continue
         if c["entry"].link in state["posted_urls"]:
@@ -831,8 +830,9 @@ def main():
             published_count += 1
             time.sleep(15)
 
+    # Fallback to ensure 3 posts even if sources overlapped
     if published_count < 3:
-        for c in candidates:
+        for c in ordered_targets:
             if published_count >= 3:
                 break
             if c["entry"].link in state["posted_urls"]:
