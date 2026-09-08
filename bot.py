@@ -48,14 +48,8 @@ BROWSER_HEADERS = {
     "Accept-Language": "bn,en-US;q=0.9,en;q=0.8"
 }
 
-POLITICS_KEYWORDS = [
-    "সরকার", "রাজনৈতিক", "নির্বাচন", "উপদেষ্টা", "আওয়ামী", "বিএনপি", "জামায়াত", "সংসদ", "আইন", 
-    "আদালত", "মামলা", "গ্রেফতার", "পুলিশ", "সেনাবাহিনী", "রিমান্ড", "politics", "political", 
-    "election", "government", "adviser", "bnp", "awami", "court", "arrest", "minister", "parliament"
-]
-
 def load_state():
-    state = {"posted_urls": []}
+    state = {"posted_urls": [], "feed_rotation_index": 0}
     if os.path.exists("posted_urls.json"):
         try:
             with open("posted_urls.json", "r", encoding="utf-8") as f:
@@ -64,6 +58,7 @@ def load_state():
                     state["posted_urls"] = data
                 elif isinstance(data, dict):
                     state["posted_urls"] = data.get("posted_urls", [])
+                    state["feed_rotation_index"] = data.get("feed_rotation_index", 0)
         except Exception:
             pass
     return state
@@ -109,7 +104,7 @@ def query_llm_dual_engine(prompt):
             try:
                 res = groq_client.chat.completions.create(
                     messages=[
-                        {"role": "system", "content": "You are the Senior Bangla News Editor of Bongo Tribune. You write 100% in fluent, professional, journalistic Bengali (বাংলা). Never output English or internal thoughts. Strict Bangladesh focus."},
+                        {"role": "system", "content": "Senior Bangla Editor. Write 100% in fluent journalistic Bengali (বাংলা). No English. Strict Bangladesh focus."},
                         {"role": "user", "content": prompt}
                     ],
                     model=model,
@@ -121,8 +116,8 @@ def query_llm_dual_engine(prompt):
                 clean = re.sub(r"<think>[\s\S]*", "", clean, flags=re.IGNORECASE).strip()
                 if len(clean) > 20:
                     return clean
-            except Exception as ge:
-                print(f"Groq {model} error: {ge}", flush=True)
+            except Exception:
+                continue
 
     if gemini_client:
         for model in ["gemini-3.6-flash", "gemini-3.5-flash"]:
@@ -142,7 +137,7 @@ def query_llm_dual_engine(prompt):
 def force_translate_to_bangla(text):
     if not text or not is_mostly_english(text):
         return text
-    prompt = f"Translate the following news text strictly into formal journalistic Bengali (Bangladesh focus). Do NOT add notes or English:\n\n{text}"
+    prompt = f"Translate strictly to journalistic Bengali (Bangladesh focus):\n\n{text[:300]}"
     translated = query_llm_dual_engine(prompt)
     if translated and not is_mostly_english(translated):
         return re.sub(r"[*#_`]", "", translated).strip(' "')
@@ -150,31 +145,27 @@ def force_translate_to_bangla(text):
 
 def analyze_and_score_news(raw_title, raw_summary, source_name):
     clean_t = pre_clean_text(raw_title)
-    clean_s = pre_clean_text(raw_summary) if raw_summary else clean_t
+    clean_s = pre_clean_text(raw_summary)[:300] if raw_summary else clean_t
 
-    prompt = f"""News Source: {source_name}
+    prompt = f"""Source: {source_name}
 Title: {clean_t}
 Summary: {clean_s}
 
-You are the Chief News Editor of Bongo Tribune.
-Select this nationwide Bangladesh story (politics, economy, crime, social debate, sports, national life) and classify its editorial priority tier:
-- Tier 1: Alert Triggers (Breaking, urgent crime, major court rulings, critical national policy, severe incidents)
-- Tier 2: Standard Desk (Economy, governance, public affairs, standard national news)
-- Tier 3: Soft News (Culture, features, lifestyle, general sports)
+Chief News Editor of Bongo Tribune. Classify tier:
+- Tier 1: Alert Triggers (Breaking, urgent crime, major court rulings, critical national policy)
+- Tier 2: Standard Desk (Economy, governance, public affairs)
+- Tier 3: Soft News (Culture, lifestyle, sports)
 
-CRITICAL RULES:
-1. Output MUST be 100% in fluent journalistic BENGALI (বাংলা). Zero English characters. Translate all English news into high-impact Bengali.
-2. Provide a 3 to 4 complete sentence Bengali summary (45 to 60 words). Never cut off mid-sentence.
-3. Output format must use these exact delimiters:
+Output exact delimiters in 100% Bengali:
 
 ###TIER###
 <1 or 2 or 3>
 ###HEADLINE###
-<বাংলায় আকর্ষণীয় শিরোনাম>
+<Bangla headline>
 ###SUBHEADLINE###
-<বাংলায় উপ-শিরোনাম অথবা None>
+<Bangla subheadline or None>
 ###SUMMARY###
-<বাংলায় ৩-৪ বাক্যের বিস্তারিত প্রতিবেদন>
+<Bangla summary, 3 sentences>
 ###SCORE###
 <1-10>"""
 
@@ -183,8 +174,7 @@ CRITICAL RULES:
         return None
 
     try:
-        clean_resp = re.sub(r"<think>[\s\S]*?</think>", "", response_text, flags=re.IGNORECASE)
-        clean_resp = re.sub(r"<think>[\s\S]*", "", clean_resp, flags=re.IGNORECASE).strip()
+        clean_resp = re.sub(r"<think>[\s\S]*?</think>", "", response_text, flags=re.IGNORECASE).strip()
 
         tier = 2
         headline = ""
@@ -222,8 +212,8 @@ CRITICAL RULES:
                 elif not summary and len(line) > 20 and line != headline:
                     summary = line
 
-        headline = re.sub(r"(?:IS_?POLITICS|ENGAGEMENT|SCORE|###)[\s\S]*", "", headline, flags=re.IGNORECASE).strip()
-        summary = re.sub(r"(?:IS_?POLITICS|ENGAGEMENT|SCORE|###)[\s\S]*", "", summary, flags=re.IGNORECASE).strip()
+        headline = re.sub(r"(?:SCORE|###)[\s\S]*", "", headline, flags=re.IGNORECASE).strip()
+        summary = re.sub(r"(?:SCORE|###)[\s\S]*", "", summary, flags=re.IGNORECASE).strip()
 
         if is_mostly_english(headline):
             headline = force_translate_to_bangla(headline)
@@ -234,16 +224,12 @@ CRITICAL RULES:
 
         summary = summary.strip()
         if summary and not summary.endswith(('।', '.', '!', '?')):
-            last_punc = max(summary.rfind('।'), summary.rfind('.'))
-            if last_punc > 20:
-                summary = summary[:last_punc + 1]
-            else:
-                summary += '।'
+            summary += '।'
 
         if not headline or len(headline) < 5:
             headline = force_translate_to_bangla(clean_t)
         if not summary or len(summary) < 15:
-            summary = force_translate_to_bangla(clean_s[:250])
+            summary = force_translate_to_bangla(clean_s[:200])
 
         return {
             "tier": tier,
@@ -292,14 +278,6 @@ def extract_high_res_image(entry):
         if url and not url.endswith(('.svg', '.gif')):
             return clean_and_maximize_image_url(url)
 
-    for field in ['summary', 'description']:
-        text_val = entry.get(field, "")
-        img_m = re.search(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', text_val, re.IGNORECASE)
-        if img_m:
-            cand = img_m.group(1)
-            if not cand.endswith(('.svg', '.gif', '.ico')) and 'avatar' not in cand.lower():
-                return clean_and_maximize_image_url(cand)
-
     try:
         resp = requests.get(entry.link, timeout=7, headers=BROWSER_HEADERS)
         if resp.status_code == 200:
@@ -309,9 +287,7 @@ def extract_high_res_image(entry):
                 r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
                 r'<meta[^>]+content=["\'](https?://[^"\']+)["\'][^>]+property=["\']og:image["\']',
                 r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\'](https?://[^"\']+)["\']',
-                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](https?://[^"\']+)["\']',
-                r'<source[^>]+srcset=["\'](https?://[^"\', ]+)["\']',
-                r'<figure[^>]*>.*?<img[^>]+src=["\'](https?://[^"\']+)["\']'
+                r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](https?://[^"\']+)["\']'
             ]
             for pat in patterns:
                 m = re.search(pat, html, re.DOTALL | re.IGNORECASE)
@@ -412,7 +388,7 @@ def download_image_robust(url, fallback_query=""):
 def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is_square=False):
     width = 1080
     height = 1080 if is_square else 1350
-    top_h = int(height * 0.60)  # Top 60% photo, Bottom 40% Canva maroon background
+    top_h = int(height * 0.60)
 
     bg_path = get_asset("background_base")
     if bg_path:
@@ -423,7 +399,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     else:
         card = Image.new("RGB", (width, height), color=(76, 0, 0))
 
-    # 1. TOP 60% PHOTO WITH GAUSSIAN BLUR FILLER
     raw_img = download_image_robust(image_url, fallback_query=headline)
     if raw_img:
         try:
@@ -439,10 +414,9 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             paste_y = (top_h - new_h) // 2
             bg_blur.paste(fit_img, (paste_x, paste_y))
             card.paste(bg_blur, (0, 0))
-        except Exception as e:
-            print(f"Photo render note: {e}", flush=True)
+        except Exception:
+            pass
 
-    # 2. TOP HEADER LOGO ("Bongo Tribune")
     header_path = get_asset("header_logo")
     if header_path:
         try:
@@ -454,7 +428,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         except Exception:
             pass
 
-    # 3. EXPANDED CHAT BUBBLE
     bubble_w = 930
     bubble_h = 570 if is_square else 660
     bubble_x = (width - bubble_w) // 2
@@ -465,14 +438,10 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     b_draw = ImageDraw.Draw(bubble_img)
     tail_h = 45
 
-    # White bubble box
     b_draw.rounded_rectangle([(0, 0), (bubble_w, bubble_h - tail_h)], radius=26, fill=(255, 255, 255, 255))
-
-    # Speech tail pointing down right above source
     tail = [(bubble_w - 150, bubble_h - tail_h), (bubble_w - 55, bubble_h), (bubble_w - 55, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
-    # WATERMARK: Maintained at exactly 10% transparency (0.10)
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
@@ -485,8 +454,8 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             wm_x = (bubble_w - wm_size) // 2
             wm_y = (bubble_h - tail_h - wm_size) // 2
             bubble_img.paste(tinted_wm, (wm_x, wm_y), mask=tinted_wm)
-        except Exception as e:
-            print(f"Watermark note: {e}", flush=True)
+        except Exception:
+            pass
 
     font_hl = get_font(44 if not is_square else 36)
     font_sub = get_font(30 if not is_square else 25)
@@ -497,7 +466,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     hl_lines = wrap_text(headline, font_hl, inner_w, b_draw)[:3]
     sub_lines = wrap_text(sub_headline, font_sub, inner_w, b_draw)[:2] if sub_headline else []
 
-    # Dynamic Font Scaling for Summary (Prevents cut-offs)
     usable_bubble_h = bubble_h - tail_h
     sum_size = 26 if not is_square else 22
     font_sum = get_font(sum_size)
@@ -529,7 +497,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 
     start_y = max(35, (usable_bubble_h - total_text_h) // 2)
 
-    # Render Headline (Maroon #4c0000, Centered)
     cur_y = start_y
     for line in hl_lines:
         bbox = b_draw.textbbox((0, 0), line, font=font_hl)
@@ -537,7 +504,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         b_draw.text((text_pad_x + (inner_w - line_w) // 2, cur_y), line, fill="#4c0000", font=font_hl)
         cur_y += (bbox[3] - bbox[0]) + spacing_hl
 
-    # Render Sub-headline (Maroon #4c0000, Centered)
     if sub_lines:
         cur_y += 6
         for line in sub_lines:
@@ -546,7 +512,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             b_draw.text((text_pad_x + (inner_w - line_w) // 2, cur_y), line, fill="#4c0000", font=font_sub)
             cur_y += (bbox[3] - bbox[0]) + spacing_sub
 
-    # Render Summary (Pure Black #000000, Centered)
     if sum_lines:
         cur_y += 16
         for line in sum_lines:
@@ -557,7 +522,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 
     card.paste(bubble_img, (bubble_x, bubble_y), mask=bubble_img)
 
-    # 4. FOOTER: DATE & SOURCE (Inside Solid Maroon #4c0000 Area)
     draw = ImageDraw.Draw(card)
     font_footer = get_font(26)
     date_str = datetime.utcnow().strftime("%d %B").upper()
@@ -699,7 +663,6 @@ def publish_article(entry, source_name, img_url, curated):
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
 
-    # Facebook Caption: Headline + Clean Summary + Link Prompt
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
     comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
 
@@ -727,7 +690,6 @@ def publish_article(entry, source_name, img_url, curated):
             ig_cdn_url = get_fb_image_url(temp_res.get("id"))
 
             if ig_cdn_url:
-                # INSTAGRAM CAPTION: Headline + Source + Hashtags (SUMMARY OMITTED FOR CLEAN FEED)
                 ig_caption = f"{headline}\n\nসূত্র: {source_name}\n\n#bongotribune #banglanews #bangladesh #news"
                 post_instagram_feed(ig_cdn_url, ig_caption)
 
@@ -747,13 +709,29 @@ def publish_article(entry, source_name, img_url, curated):
     return True
 
 def scan_feeds_smart(state):
-    print(f"Smart-scanning {len(ALL_FEEDS)} media feeds with Editorial Priority Tiers...", flush=True)
+    print(f"Smart-scanning feeds with Rotational Queue & Editorial Tiers...", flush=True)
     all_evaluated = []
 
-    for feed in ALL_FEEDS:
+    # Rotational Batching: Pick 4 portals per cycle (e.g., A, B, C, D -> then E, F, G, H)
+    total_feeds = len(ALL_FEEDS)
+    batch_size = 4
+    start_idx = state.get("feed_rotation_index", 0) % total_feeds
+    
+    current_batch = []
+    for i in range(batch_size):
+        feed_idx = (start_idx + i) % total_feeds
+        current_batch.append(ALL_FEEDS[feed_idx])
+
+    # Save next rotation index for the subsequent run
+    state["feed_rotation_index"] = (start_idx + batch_size) % total_feeds
+    save_state(state)
+
+    print(f"Scanning batch of {len(current_batch)} portals for this cycle...", flush=True)
+
+    for feed in current_batch:
         try:
             parsed = feedparser.parse(feed["url"])
-            for entry in parsed.entries[:6]:
+            for entry in parsed.entries[:5]:
                 if entry.link in state["posted_urls"]:
                     continue
                 clean_t = pre_clean_text(entry.title)
@@ -776,6 +754,32 @@ def scan_feeds_smart(state):
         except Exception:
             continue
 
+    # Fallback: If current batch yielded no stories, scan all feeds as backup
+    if not all_evaluated:
+        print("Batch yielded no unposted news. Scanning all feeds as fallback...", flush=True)
+        for feed in ALL_FEEDS:
+            try:
+                parsed = feedparser.parse(feed["url"])
+                for entry in parsed.entries[:3]:
+                    if entry.link in state["posted_urls"]:
+                        continue
+                    clean_t = pre_clean_text(entry.title)
+                    if len(clean_t.split()) < 3:
+                        continue
+                    curated = analyze_and_score_news(entry.title, entry.get("summary", ""), feed["name"])
+                    if curated:
+                        img_url = extract_high_res_image(entry)
+                        all_evaluated.append({
+                            "entry": entry,
+                            "source_name": feed["name"],
+                            "img_url": img_url,
+                            "curated": curated,
+                            "tier": curated["tier"],
+                            "score": curated["score"]
+                        })
+            except Exception:
+                continue
+
     return all_evaluated
 
 def main():
@@ -794,7 +798,6 @@ def main():
     tier_2 = [c for c in candidates if c["tier"] == 2]
     tier_3 = [c for c in candidates if c["tier"] == 3]
 
-    # Sort each tier by engagement score descending
     tier_1.sort(key=lambda x: x["score"], reverse=True)
     tier_2.sort(key=lambda x: x["score"], reverse=True)
     tier_3.sort(key=lambda x: x["score"], reverse=True)
@@ -807,7 +810,6 @@ def main():
     if tier_3:
         ordered_targets.append(tier_3[0])  # Slot 3: Soft News
 
-    # Fill remaining slots from any tier if needed to reach 3 total posts
     remaining = [c for c in (tier_1 + tier_2 + tier_3) if c not in ordered_targets]
     remaining.sort(key=lambda x: x["score"], reverse=True)
     ordered_targets.extend(remaining)
@@ -817,7 +819,6 @@ def main():
     for c in ordered_targets:
         if published_count >= 3:
             break
-        # Source cycling check: Avoid repeating sources in the same cycle if possible
         if c["source_name"] in used_sources and len(used_sources) < len(candidates):
             continue
         if c["entry"].link in state["posted_urls"]:
@@ -830,9 +831,8 @@ def main():
             published_count += 1
             time.sleep(15)
 
-    # Fallback to ensure 3 posts even if sources overlapped
     if published_count < 3:
-        for c in ordered_targets:
+        for c in candidates:
             if published_count >= 3:
                 break
             if c["entry"].link in state["posted_urls"]:
