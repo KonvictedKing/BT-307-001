@@ -36,7 +36,40 @@ ALL_FEEDS = [
     {"name": "Kalbela", "url": "https://www.kalbela.com/feed"},
     {"name": "Somoy TV", "url": "https://www.somoynews.tv/rss.xml"},
     {"name": "Channel 24", "url": "https://www.channel24bd.tv/rss.xml"},
-    {"name": "Jamuna TV", "url": "https://www.jamuna.tv/feed"}
+    {"name": "Jamuna TV", "url": "https://www.jamuna.tv/feed"},
+    {"name": "Bangla Tribune", "url": "https://www.banglatribune.com/feed"},
+    {"name": "Risingbd", "url": "https://www.risingbd.com/rss/rss.xml"},
+    {"name": "Bangladesh Journal", "url": "https://www.bd-journal.com/feed/latest-r"},
+    {"name": "Daily Bangladesh", "url": "https://www.daily-bangladesh.com/rss/rss.xml"},
+    {"name": "Barta24", "url": "https://barta24.com/feed"},
+    {"name": "Dhaka Times", "url": "https://www.dhakatimes24.com/feed"},
+    {"name": "Bhorer Kagoj", "url": "https://www.bhorerkagoj.com/feed"},
+    {"name": "Inqilab", "url": "https://www.dailyinqilab.com/feed"},
+    {"name": "Manab Zamin", "url": "https://mzamin.com/rss.xml"},
+    {"name": "Amar Desh", "url": "https://www.amardesh.com/feed"},
+    {"name": "Sangbad", "url": "https://www.thesangbad.net/feed"},
+    {"name": "Bonik Barta", "url": "https://bonikbarta.net/feed"},
+    {"name": "Protidiner Bangladesh", "url": "https://www.protidinerbangladesh.com/feed"},
+    {"name": "Ajker Patrika", "url": "https://www.ajkerpatrika.com/feed"},
+    {"name": "Desh Rupantor", "url": "https://www.deshrupantor.com/feed"},
+    {"name": "Dhaka Patrika", "url": "https://dhakapatrika.com/feed"},
+    {"name": "Amader Shomoy", "url": "https://www.dainikamadershomoy.com/feed"},
+    {"name": "The Asian Age", "url": "https://dailyasianage.com/feed"},
+    {"name": "New Age", "url": "https://www.newagebd.net/rss"},
+    {"name": "The Financial Express", "url": "https://thefinancialexpress.com.bd/feed"},
+    {"name": "Bangladesh Post", "url": "https://bangladeshpost.net/rss.xml"},
+    {"name": "Independent Television", "url": "https://www.independent24.com/feed"},
+    {"name": "RTV Online", "url": "https://www.rtvonline.com/feed"},
+    {"name": "NTV Online", "url": "https://www.ntvbd.com/feed"},
+    {"name": "Channel i Online", "url": "https://www.channelionline.com/feed"},
+    {"name": "Ekattor TV", "url": "https://www.ekattor.tv/feed"},
+    {"name": "Sarabangla", "url": "https://sarabangla.net/feed"},
+    {"name": "BSS News", "url": "https://www.bssnews.net/feed"},
+    {"name": "Bangladesh Pratidin", "url": "https://www.bd-pratidin.com/feed"},
+    {"name": "Daily Janakantha", "url": "https://www.janakantha.com/feed"},
+    {"name": "Ekushey TV", "url": "https://www.ekushey-tv.com/feed"},
+    {"name": "Sun News", "url": "https://www.sunnews24x7.com/rss"},
+    {"name": "BD24Live", "url": "https://bd24live.com/feed"}
 ]
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -553,10 +586,47 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     card.save(filename, "JPEG", quality=95)
     return filename
 
-def build_instagram_story(image_url, feed_card_path, headline):
+def build_facebook_story_canvas(fb_card_path):
     story_w, story_h = 1080, 1920
     
-    # Restored: Beautiful blurred ambient photo background with dark vignette overlay for Instagram Stories
+    # EXACT BACKGROUND ASSET: Load background_base.png for Facebook Stories to match your maroon branding exactly
+    bg_path = get_asset("background_base")
+    if bg_path:
+        try:
+            bg = Image.open(bg_path).convert("RGB").resize((story_w, story_h), Image.Resampling.LANCZOS)
+        except Exception:
+            bg = Image.new("RGB", (story_w, story_h), color=(76, 0, 0))
+    else:
+        bg = Image.new("RGB", (story_w, story_h), color=(76, 0, 0))
+
+    feed_card = Image.open(fb_card_path).convert("RGB")
+    target_card_w = int(story_w * 0.88)
+    # Scale based on the 1080x1350 card aspect ratio
+    target_card_h = int(target_card_w * (1350 / 1080))
+    scaled_card = feed_card.resize((target_card_w, target_card_h), Image.Resampling.LANCZOS)
+
+    radius = 32
+    mask = Image.new("L", (target_card_w, target_card_h), 0)
+    draw_mask = ImageDraw.Draw(mask)
+    draw_mask.rounded_rectangle([(0, 0), (target_card_w, target_card_h)], radius=radius, fill=255)
+
+    card_x = (story_w - target_card_w) // 2
+    card_y = (story_h - target_card_h) // 2 - 50
+    bg.paste(scaled_card, (card_x, card_y), mask)
+
+    draw = ImageDraw.Draw(bg)
+    handle_font = get_font(34)
+    handle_w = draw.textbbox((0, 0), "@bongo.tribune", font=handle_font)[2]
+    draw.text(((story_w - handle_w) // 2, card_y + target_card_h + 30), "@bongo.tribune", fill="#ffffff", font=handle_font)
+
+    story_path = "final_story_fb.jpg"
+    bg.save(story_path, "JPEG", quality=95)
+    return story_path
+
+def build_instagram_story_canvas(image_url, feed_card_path, headline):
+    story_w, story_h = 1080, 1920
+    
+    # Gaussian-blurred ambient background for Instagram Stories
     raw_img = download_image_robust(image_url, fallback_query=headline)
     if raw_img:
         bg = raw_img.resize((story_w, story_h), Image.Resampling.BILINEAR)
@@ -622,7 +692,6 @@ def post_facebook_comment(target_id, message):
         return None
 
 def post_facebook_story(story_image_path):
-    # FIXED: Now posts the styled vertical story card (`final_story_ig.jpg`) instead of the square feed card
     url = f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos"
     payload = {"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
     with open(story_image_path, "rb") as f:
@@ -689,8 +758,11 @@ def publish_article(entry, source_name, img_url, curated):
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
 
-    # Build the blurred story image for both FB and IG stories
-    styled_story_path = build_instagram_story(img_url, ig_card_path, headline)
+    # Build Facebook Story canvas using the Canva background asset
+    fb_story_canvas_path = build_facebook_story_canvas(fb_card_path)
+
+    # Build Instagram blurred story canvas
+    ig_story_path = build_instagram_story_canvas(img_url, ig_card_path, headline)
 
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
     comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
@@ -704,10 +776,18 @@ def publish_article(entry, source_name, img_url, curated):
 
     post_facebook_comment(fb_photo_id, comment_text_fb)
 
+    # FACEBOOK STORY: Uploads the custom maroon background vertical story
     try:
-        post_facebook_story(styled_story_path)
+        temp_fb_story = requests.post(
+            f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
+            files={"source": open(fb_story_canvas_path, "rb")},
+            data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
+        ).json()
+        fb_story_cdn = get_fb_image_url(temp_fb_story.get("id"))
+        if fb_story_cdn:
+            post_facebook_story(fb_story_cdn)
     except Exception as err:
-        print(f"FB Story bypass: {err}", flush=True)
+        print(f"FB Story error: {err}", flush=True)
 
     if IG_USER_ID:
         try:
@@ -724,7 +804,7 @@ def publish_article(entry, source_name, img_url, curated):
 
             story_res = requests.post(
                 f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
-                files={"source": open(styled_story_path, "rb")},
+                files={"source": open(ig_story_path, "rb")},
                 data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
             ).json()
             story_cdn = get_fb_image_url(story_res.get("id"))
