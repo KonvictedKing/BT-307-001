@@ -273,7 +273,7 @@ def search_related_news_image(query):
         encoded = urllib.parse.quote(f"{clean_q} news bangladesh")
         url = f"https://html.duckduckgo.com/html/?q={encoded}"
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6)
-        candidates = re.findall(r'//external-content\.duckduckgo\.com/iu/\?u=(https?://[^&"\']+)', resp.text)
+        candidates = re.findall(r'//external-content\.duckduckgo.com/iu/\?u=(https?://[^&"\']+)', resp.text)
         for cand in candidates:
             dec = urllib.parse.unquote(cand)
             if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in dec.lower() and 'icon' not in dec.lower():
@@ -394,18 +394,17 @@ def download_image_robust(url, fallback_query=""):
     if img:
         return img
 
-    if fallback_query:
-        fallback_url = search_related_news_image(fallback_query)
-        img = try_fetch(fallback_url)
-        if img:
-            return img
+    fallback_url = search_related_news_image(fallback_query or "Bangladesh news")
+    img = try_fetch(fallback_url)
+    if img:
+        return img
 
-    return None
+    return Image.new("RGB", (1080, 810), color=(76, 0, 0))
 
 def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is_square=False):
     width = 1080
     height = 1080 if is_square else 1350
-    top_h = int(height * 0.60)  # Top 60% photo, Bottom 40% Canva maroon background
+    top_h = int(height * 0.60)
 
     bg_path = get_asset("background_base")
     if bg_path:
@@ -416,7 +415,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     else:
         card = Image.new("RGB", (width, height), color=(76, 0, 0))
 
-    # 1. TOP 60% PHOTO WITH GAUSSIAN BLUR FILLER
     raw_img = download_image_robust(image_url, fallback_query=headline)
     if raw_img:
         try:
@@ -432,10 +430,9 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             paste_y = (top_h - new_h) // 2
             bg_blur.paste(fit_img, (paste_x, paste_y))
             card.paste(bg_blur, (0, 0))
-        except Exception as e:
-            print(f"Photo render note: {e}", flush=True)
+        except Exception:
+            pass
 
-    # 2. TOP HEADER LOGO ("Bongo Tribune")
     header_path = get_asset("header_logo")
     if header_path:
         try:
@@ -447,7 +444,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         except Exception:
             pass
 
-    # 3. EXPANDED CHAT BUBBLE
     bubble_w = 930
     bubble_h = 570 if is_square else 660
     bubble_x = (width - bubble_w) // 2
@@ -458,14 +454,10 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     b_draw = ImageDraw.Draw(bubble_img)
     tail_h = 45
 
-    # White bubble box
     b_draw.rounded_rectangle([(0, 0), (bubble_w, bubble_h - tail_h)], radius=26, fill=(255, 255, 255, 255))
-
-    # Speech tail pointing down right above source
     tail = [(bubble_w - 150, bubble_h - tail_h), (bubble_w - 55, bubble_h), (bubble_w - 55, bubble_h - tail_h)]
     b_draw.polygon(tail, fill=(255, 255, 255, 255))
 
-    # WATERMARK: Maintained at exactly 10% transparency (0.10)
     watermark_path = get_asset("watermark")
     if watermark_path:
         try:
@@ -478,8 +470,8 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             wm_x = (bubble_w - wm_size) // 2
             wm_y = (bubble_h - tail_h - wm_size) // 2
             bubble_img.paste(tinted_wm, (wm_x, wm_y), mask=tinted_wm)
-        except Exception as e:
-            print(f"Watermark note: {e}", flush=True)
+        except Exception:
+            pass
 
     font_hl = get_font(44 if not is_square else 36)
     font_sub = get_font(30 if not is_square else 25)
@@ -490,7 +482,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     hl_lines = wrap_text(headline, font_hl, inner_w, b_draw)[:3]
     sub_lines = wrap_text(sub_headline, font_sub, inner_w, b_draw)[:2] if sub_headline else []
 
-    # Dynamic Font Scaling for Summary (Prevents cut-offs)
     usable_bubble_h = bubble_h - tail_h
     sum_size = 26 if not is_square else 22
     font_sum = get_font(sum_size)
@@ -522,7 +513,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 
     start_y = max(35, (usable_bubble_h - total_text_h) // 2)
 
-    # Render Headline (Maroon #4c0000, Centered)
     cur_y = start_y
     for line in hl_lines:
         bbox = b_draw.textbbox((0, 0), line, font=font_hl)
@@ -530,7 +520,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
         b_draw.text((text_pad_x + (inner_w - line_w) // 2, cur_y), line, fill="#4c0000", font=font_hl)
         cur_y += (bbox[3] - bbox[0]) + spacing_hl
 
-    # Render Sub-headline (Maroon #4c0000, Centered)
     if sub_lines:
         cur_y += 6
         for line in sub_lines:
@@ -539,7 +528,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
             b_draw.text((text_pad_x + (inner_w - line_w) // 2, cur_y), line, fill="#4c0000", font=font_sub)
             cur_y += (bbox[3] - bbox[0]) + spacing_sub
 
-    # Render Summary (Pure Black #000000, Centered)
     if sum_lines:
         cur_y += 16
         for line in sum_lines:
@@ -550,7 +538,6 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 
     card.paste(bubble_img, (bubble_x, bubble_y), mask=bubble_img)
 
-    # 4. FOOTER: DATE & SOURCE (Inside Solid Maroon #4c0000 Area)
     draw = ImageDraw.Draw(card)
     font_footer = get_font(26)
     date_str = datetime.utcnow().strftime("%d %B").upper()
@@ -571,10 +558,15 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
 def build_instagram_story(feed_card_path):
     story_w, story_h = 1080, 1920
     feed_card = Image.open(feed_card_path).convert("RGB")
-    bg = feed_card.resize((story_w, story_h), Image.Resampling.BILINEAR)
-    bg = bg.filter(ImageFilter.GaussianBlur(radius=45))
-    dark_overlay = Image.new("RGB", (story_w, story_h), color="#000000")
-    bg = Image.blend(bg, dark_overlay, alpha=0.35)
+    
+    bg_path = get_asset("background_base")
+    if bg_path:
+        try:
+            bg = Image.open(bg_path).convert("RGB").resize((story_w, story_h), Image.Resampling.LANCZOS)
+        except Exception:
+            bg = Image.new("RGB", (story_w, story_h), color=(76, 0, 0))
+    else:
+        bg = Image.new("RGB", (story_w, story_h), color=(76, 0, 0))
 
     target_card_w = int(story_w * 0.88)
     scaled_card = feed_card.resize((target_card_w, target_card_w), Image.Resampling.LANCZOS)
@@ -692,7 +684,6 @@ def publish_article(entry, source_name, img_url, curated):
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
 
-    # Facebook Caption: Headline + Clean Summary + Link Prompt
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
     comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
 
@@ -720,7 +711,6 @@ def publish_article(entry, source_name, img_url, curated):
             ig_cdn_url = get_fb_image_url(temp_res.get("id"))
 
             if ig_cdn_url:
-                # INSTAGRAM CAPTION: Headline + Source + Hashtags (SUMMARY OMITTED FOR CLEAN FEED)
                 ig_caption = f"{headline}\n\nসূত্র: {source_name}\n\n#bongotribune #banglanews #bangladesh #news"
                 post_instagram_feed(ig_cdn_url, ig_caption)
 
@@ -818,7 +808,6 @@ def main():
         print("No qualifying Bangladesh articles evaluated in this run.", flush=True)
         return
 
-    # Group by Tiers
     tier_1 = [c for c in candidates if c["tier"] == 1]
     tier_2 = [c for c in candidates if c["tier"] == 2]
     tier_3 = [c for c in candidates if c["tier"] == 3]
@@ -831,7 +820,6 @@ def main():
     used_sources = set()
     selected_posts = []
 
-    # STRICT REQUIREMENT: 3 posts must be from 3 DIFFERENT sources AND different Tiers (1, 2, 3)
     pools = [(1, tier_1), (2, tier_2), (3, tier_3)]
     
     for tier_num, pool in pools:
@@ -841,7 +829,7 @@ def main():
                 used_sources.add(c["source_name"])
                 break
 
-    # If any tier pool was empty, fill remaining slots with next best un-used source/tier
+    # Relaxed Fallback: Guarantee 3 distinct posts even if a tier pool is missing in the current batch
     if len(selected_posts) < 3:
         all_remaining = tier_1 + tier_2 + tier_3
         all_remaining.sort(key=lambda x: x["score"], reverse=True)
@@ -852,7 +840,7 @@ def main():
                 selected_posts.append(c)
                 used_sources.add(c["source_name"])
 
-    print(f"Publishing 3 strictly unique stories (Tier 1, 2, 3 across 3 distinct sources)...", flush=True)
+    print(f"Publishing {len(selected_posts)} unique stories across distinct sources...", flush=True)
 
     for c in selected_posts:
         if publish_article(c["entry"], c["source_name"], c["img_url"], c["curated"]):
