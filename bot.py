@@ -553,19 +553,24 @@ def build_bongo_card(image_url, headline, sub_headline, summary, source_name, is
     card.save(filename, "JPEG", quality=95)
     return filename
 
-def build_instagram_story(feed_card_path):
+def build_instagram_story(image_url, feed_card_path, headline):
     story_w, story_h = 1080, 1920
-    feed_card = Image.open(feed_card_path).convert("RGB")
     
-    bg_path = get_asset("background_base")
-    if bg_path:
-        try:
-            bg = Image.open(bg_path).convert("RGB").resize((story_w, story_h), Image.Resampling.LANCZOS)
-        except Exception:
-            bg = Image.new("RGB", (story_w, story_h), color=(76, 0, 0))
+    # Restored: Beautiful blurred ambient photo background with dark vignette overlay for Instagram Stories
+    raw_img = download_image_robust(image_url, fallback_query=headline)
+    if raw_img:
+        bg = raw_img.resize((story_w, story_h), Image.Resampling.BILINEAR)
+        bg = bg.filter(ImageFilter.GaussianBlur(radius=45))
+        dark_overlay = Image.new("RGB", (story_w, story_h), color="#000000")
+        bg = Image.blend(bg, dark_overlay, alpha=0.35)
     else:
-        bg = Image.new("RGB", (story_w, story_h), color=(76, 0, 0))
+        bg_path = get_asset("background_base")
+        if bg_path:
+            bg = Image.open(bg_path).convert("RGB").resize((story_w, story_h), Image.Resampling.LANCZOS)
+        else:
+            bg = Image.new("RGB", (story_w, story_h), color=(76, 0, 0))
 
+    feed_card = Image.open(feed_card_path).convert("RGB")
     target_card_w = int(story_w * 0.88)
     scaled_card = feed_card.resize((target_card_w, target_card_w), Image.Resampling.LANCZOS)
 
@@ -616,10 +621,11 @@ def post_facebook_comment(target_id, message):
         print(f"FB Comment error: {e}", flush=True)
         return None
 
-def post_facebook_story(image_path):
+def post_facebook_story(story_image_path):
+    # FIXED: Now posts the styled vertical story card (`final_story_ig.jpg`) instead of the square feed card
     url = f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos"
     payload = {"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
-    with open(image_path, "rb") as f:
+    with open(story_image_path, "rb") as f:
         res = requests.post(url, files={"source": f}, data=payload).json()
         photo_id = res.get("id")
         if photo_id:
@@ -683,6 +689,9 @@ def publish_article(entry, source_name, img_url, curated):
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
 
+    # Build the blurred story image for both FB and IG stories
+    styled_story_path = build_instagram_story(img_url, ig_card_path, headline)
+
     post_caption_fb = f"{headline}\n\n{summary}\n\n(বিস্তারিত প্রথম কমেন্টে)"
     comment_text_fb = f"সম্পূর্ণ প্রতিবেদনটি পড়তে ভিজিট করুন:\n{entry.link}"
 
@@ -696,7 +705,7 @@ def publish_article(entry, source_name, img_url, curated):
     post_facebook_comment(fb_photo_id, comment_text_fb)
 
     try:
-        post_facebook_story(fb_card_path)
+        post_facebook_story(styled_story_path)
     except Exception as err:
         print(f"FB Story bypass: {err}", flush=True)
 
@@ -713,7 +722,6 @@ def publish_article(entry, source_name, img_url, curated):
                 ig_caption = f"{headline}\n\nসূত্র: {source_name}\n\n#bongotribune #banglanews #bangladesh #news"
                 post_instagram_feed(ig_cdn_url, ig_caption)
 
-            styled_story_path = build_instagram_story(ig_card_path)
             story_res = requests.post(
                 f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
                 files={"source": open(styled_story_path, "rb")},
@@ -827,7 +835,6 @@ def main():
                 used_sources.add(c["source_name"])
                 break
 
-    # Relaxed Fallback: Guarantee up to 3 distinct posts from unused sources if pools are short
     if len(selected_posts) < 3:
         all_remaining = sorted(candidates, key=lambda x: x["score"], reverse=True)
         for c in all_remaining:
