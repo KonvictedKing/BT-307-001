@@ -59,7 +59,21 @@ ALL_FEEDS = [
     {"name": "Bhorer Kagoj", "url": "https://www.bhorerkagoj.com/feed"},
     {"name": "BD24Live", "url": "https://bd24live.com/feed"},
     {"name": "Daily Inqilab", "url": "https://www.dailyinqilab.com/feed"},
-    {"name": "Sun News", "url": "https://www.sunnews24x7.com/rss"}
+    {"name": "Sun News", "url": "https://www.sunnews24x7.com/rss"},
+    {"name": "The Daily Campus", "url": "https://thedailycampus.com/rss.xml"},
+    {"name": "Jamuna TV", "url": "https://www.jamuna.tv/feed"},
+    {"name": "RTV Online", "url": "https://www.rtvonline.com/feed"},
+    {"name": "DBC News", "url": "https://dbcnews.tv/rss.xml"},
+    {"name": "Somoy TV", "url": "https://www.somoynews.tv/rss.xml"},
+    {"name": "Channel 24", "url": "https://www.channel24bd.tv/rss.xml"},
+    {"name": "Daily Azadi", "url": "https://www.dainikazadi.net/feed/"},
+    {"name": "Daily Purbokone", "url": "https://www.dainikpurbokone.net/feed/"},
+    {"name": "Daily Karatoa", "url": "https://karatoa.com.bd/feed/"},
+    {"name": "Amar Comilla", "url": "https://amarcomilla.com/feed/"},
+    {"name": "Gramer Kagoj", "url": "https://gramerkagoj.com/feed/"},
+    {"name": "Khulnachal", "url": "https://khulnachal.com/feed/"},
+    {"name": "Sylhet Express", "url": "https://sylhetexpress.com/feed/"},
+    {"name": "Uttorpurbo", "url": "https://uttorpurbo.com/feed/"}
 ]
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
