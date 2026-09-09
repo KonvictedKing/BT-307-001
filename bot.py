@@ -166,7 +166,7 @@ def query_llm_dual_engine(prompt):
                 print(f"Groq {model} error: {ge}", flush=True)
 
     if gemini_client:
-        for model in ["gemini-3.6-flash", "gemini-3.5-flash"]:
+        for model in ["gemini-2.5-flash", "gemini-2.0-flash"]:
             try:
                 res = gemini_client.models.generate_content(
                     model=model,
@@ -237,7 +237,7 @@ CRITICAL RULES:
         if tier_m:
             tier = int(tier_m.group(1))
 
-        hl_m = re.search(r"###HEADLINE###\s*([\s\S]*?)(?=###SUBHEADLINE###|$)", clean_resp)
+        hl_m = re.search(r"###HEADLINE###\s*\n?([^\n#]+)", clean_resp)
         if hl_m:
             headline = hl_m.group(1).strip(' \n"')
 
@@ -281,9 +281,10 @@ CRITICAL RULES:
             else:
                 summary += '।'
 
-        if not headline or len(headline) < 5:
+        # Ensure headline is at least 3 distinct words; otherwise restore full clean title
+        if not headline or len(headline.split()) < 3:
             headline = force_translate_to_bangla(clean_t)
-        if not summary or len(summary) < 15:
+        if not summary or len(summary.split()) < 5:
             summary = force_translate_to_bangla(clean_s[:250])
 
         return {
@@ -309,31 +310,29 @@ def clean_and_maximize_image_url(url):
 
 def search_related_news_image(query):
     try:
-        q_lower = query.lower()
         clean_text = re.sub(r'[^\w\s]', ' ', query).strip()
+        search_kw = clean_text[:30].strip()
 
-        # Contextual entity mapping for thematic/emblem fallbacks
-        if "বিশ্ববিদ্যালয়" in q_lower or "university" in q_lower:
-            search_term = f"{clean_text[:25]} university logo emblem bangladesh"
-        elif "স্বাস্থ্য" in q_lower or "ডেঙ্গু" in q_lower or "hospital" in q_lower:
-            search_term = "directorate general of health services bangladesh logo"
-        elif "জাতিসংঘ" in q_lower or "un" in q_lower or "general assembly" in q_lower:
-            search_term = "united nations flag logo emblem"
-        elif "খেলা" in q_lower or "cricket" in q_lower or "football" in q_lower:
-            search_term = "bangladesh cricket football sports stadium"
-        elif "আদালত" in q_lower or "হাইকোর্ট" in q_lower or "সুপ্রিম কোর্ট" in q_lower:
-            search_term = "supreme court of bangladesh building"
-        else:
-            search_term = f"{clean_text[:35]} news bangladesh"
-
-        encoded = urllib.parse.quote(search_term)
+        # Engine 1: DuckDuckGo HTML
+        encoded = urllib.parse.quote(f"{search_kw} Bangladesh")
         url = f"https://html.duckduckgo.com/html/?q={encoded}"
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6)
         candidates = re.findall(r'//external-content\.duckduckgo\.com/iu/\?u=(https?://[^&"\']+)', resp.text)
         for cand in candidates:
             dec = urllib.parse.unquote(cand)
-            if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+            if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')) and not any(x in dec.lower() for x in ['logo', 'icon', 'pixel']):
                 return dec
+
+        # Engine 2: Wikimedia Commons API (Highly reliable from cloud IPs)
+        wiki_url = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={urllib.parse.quote('Bangladesh ' + search_kw[:15])}&gsrlimit=3&prop=imageinfo&iiprop=url&format=json"
+        w_res = requests.get(wiki_url, headers=BROWSER_HEADERS, timeout=5).json()
+        pages = w_res.get("query", {}).get("pages", {})
+        for p_id, p_info in pages.items():
+            img_info = p_info.get("imageinfo", [])
+            if img_info and "url" in img_info[0]:
+                u = img_info[0]["url"]
+                if u.endswith(('.jpg', '.jpeg', '.png')):
+                    return u
     except Exception:
         pass
     return None
@@ -807,22 +806,26 @@ def publish_article(entry, source_name, img_url, curated):
 
     if IG_USER_ID:
         try:
-            temp_res = requests.post(
-                f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
-                files={"source": open(ig_card_path, "rb")},
-                data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
-            ).json()
+            with open(ig_card_path, "rb") as f_ig:
+                temp_res = requests.post(
+                    f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
+                    files={"source": f_ig},
+                    data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN},
+                    timeout=20
+                ).json()
             ig_cdn_url = get_fb_image_url(temp_res.get("id"))
 
             if ig_cdn_url:
                 ig_caption = f"{headline}\n\nসূত্র: {source_name}\n\n#bongotribune #banglanews #bangladesh #news"
                 post_instagram_feed(ig_cdn_url, ig_caption)
 
-            story_res = requests.post(
-                f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
-                files={"source": open(ig_story_path, "rb")},
-                data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
-            ).json()
+            with open(ig_story_path, "rb") as f_story:
+                story_res = requests.post(
+                    f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
+                    files={"source": f_story},
+                    data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN},
+                    timeout=20
+                ).json()
             story_cdn = get_fb_image_url(story_res.get("id"))
 
             if story_cdn:
@@ -863,6 +866,9 @@ def scan_feeds_smart(state):
                 curated = analyze_and_score_news(entry.title, entry.get("summary", ""), feed["name"])
                 if curated:
                     img_url = extract_high_res_image(entry)
+                    # Skip articles where no image could be retrieved
+                    if not img_url:
+                        continue
                     all_evaluated.append({
                         "entry": entry,
                         "source_name": feed["name"],
@@ -890,6 +896,9 @@ def scan_feeds_smart(state):
                     curated = analyze_and_score_news(entry.title, entry.get("summary", ""), feed["name"])
                     if curated:
                         img_url = extract_high_res_image(entry)
+                        # Skip if no image was found so it doesn't post a blank card
+                        if not img_url:
+                            continue
                         all_evaluated.append({
                             "entry": entry,
                             "source_name": feed["name"],
