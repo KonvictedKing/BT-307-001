@@ -313,9 +313,11 @@ def clean_and_maximize_image_url(url):
 def search_related_news_image(query):
     try:
         q_lower = query.lower()
+        clean_text = re.sub(r'[^\w\s]', ' ', query).strip()
+
         # Contextual entity mapping for thematic/emblem fallbacks
         if "বিশ্ববিদ্যালয়" in q_lower or "university" in q_lower:
-            search_term = f"{re.sub(r'[^\\w\\s]', ' ', query)[:25].strip()} university logo emblem bangladesh"
+            search_term = f"{clean_text[:25]} university logo emblem bangladesh"
         elif "স্বাস্থ্য" in q_lower or "ডেঙ্গু" in q_lower or "hospital" in q_lower:
             search_term = "directorate general of health services bangladesh logo"
         elif "জাতিসংঘ" in q_lower or "un" in q_lower or "general assembly" in q_lower:
@@ -325,7 +327,7 @@ def search_related_news_image(query):
         elif "আদালত" in q_lower or "হাইকোর্ট" in q_lower or "সুপ্রিম কোর্ট" in q_lower:
             search_term = "supreme court of bangladesh building"
         else:
-            search_term = f"{re.sub(r'[^\\w\\s]', ' ', query)[:35].strip()} news bangladesh"
+            search_term = f"{clean_text[:35]} news bangladesh"
 
         encoded = urllib.parse.quote(search_term)
         url = f"https://html.duckduckgo.com/html/?q={encoded}"
