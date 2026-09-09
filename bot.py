@@ -714,15 +714,18 @@ def post_facebook_comment(target_id, message):
         print(f"FB Comment error: {e}", flush=True)
         return None
 
-def post_facebook_story(story_image_url):
+def post_facebook_story(image_path):
     url = f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos"
     payload = {"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
-    with open(story_image_url, "rb") as f:
-        res = requests.post(url, files={"source": f}, data=payload).json()
+    try:
+        with open(image_path, "rb") as f:
+            res = requests.post(url, files={"source": f}, data=payload, timeout=20).json()
         photo_id = res.get("id")
         if photo_id:
             story_url = f"https://graph.facebook.com/v20.0/{PAGE_ID}/photo_stories"
-            requests.post(story_url, data={"photo_id": photo_id, "access_token": ACCESS_TOKEN})
+            requests.post(story_url, data={"photo_id": photo_id, "access_token": ACCESS_TOKEN}, timeout=20)
+    except Exception as err:
+        print(f"FB Story error: {err}", flush=True)
 
 def wait_for_ig_container(creation_id):
     status_url = f"https://graph.facebook.com/v20.0/{creation_id}?fields=status_code&access_token={ACCESS_TOKEN}"
@@ -781,9 +784,6 @@ def publish_article(entry, source_name, img_url, curated):
 
     ig_card_path = build_bongo_card(img_url, headline, sub_headline, summary, source_name, is_square=True)
 
-    # Build Facebook Story Canvas (Maroon background asset layout)
-    fb_story_canvas_path = build_facebook_story_canvas(fb_card_path)
-
     # Build Instagram Blurred Story Canvas
     ig_story_path = build_instagram_story_canvas(img_url, ig_card_path, headline)
 
@@ -799,9 +799,9 @@ def publish_article(entry, source_name, img_url, curated):
 
     post_facebook_comment(fb_photo_id, comment_text_fb)
 
-    # FACEBOOK STORY: Pass the local file path directly
+    # FACEBOOK STORY: Share the feed card directly to get native automatic gradient styling
     try:
-        post_facebook_story(fb_story_canvas_path)
+        post_facebook_story(fb_card_path)
     except Exception as err:
         print(f"FB Story error: {err}", flush=True)
 
@@ -840,7 +840,7 @@ def scan_feeds_smart(state):
     all_evaluated = []
 
     total_feeds = len(ALL_FEEDS)
-    batch_size = 6
+    batch_size = 20
     start_idx = state.get("feed_rotation_index", 0) % total_feeds
     
     current_batch = []
@@ -938,15 +938,24 @@ def main():
         if len(selected_posts) >= 3:
             break
 
-    # Guaranteed Quota Fallback: If lower than 3 posts, pull highest remaining scores from unused sources
+    # Guaranteed Quota Fallback: Guarantee exactly 3 posts
     if len(selected_posts) < 3:
         all_remaining = sorted(candidates, key=lambda x: x["score"], reverse=True)
+        # Pass 1: Try unused sources first
         for c in all_remaining:
             if len(selected_posts) >= 3:
                 break
             if c not in selected_posts and c["source_name"] not in used_sources and c["entry"].link not in state["posted_urls"]:
                 selected_posts.append(c)
                 used_sources.add(c["source_name"])
+
+        # Pass 2: If still under 3, relax source uniqueness to fill the quota
+        if len(selected_posts) < 3:
+            for c in all_remaining:
+                if len(selected_posts) >= 3:
+                    break
+                if c not in selected_posts and c["entry"].link not in state["posted_urls"]:
+                    selected_posts.append(c)
 
     print(f"Publishing {len(selected_posts)} unique stories across distinct sources...", flush=True)
 
