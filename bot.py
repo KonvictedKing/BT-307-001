@@ -108,14 +108,24 @@ def save_state(state):
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 def pre_clean_text(text):
+    if not text:
+        return ""
     cleaned = re.sub(r"<[^>]+>", "", text)
-    patterns = [r"\[.*?\]", r"\(.*?\)", r"\|.*$"]
-    for p in patterns:
-        cleaned = re.sub(p, "", cleaned)
-    cleaned = re.sub(r"Photo:.*?(\.|$)", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"Author:.*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\[.*?\]|\(.*?\)|\|.*$", "", cleaned)
     return cleaned.strip()
 
+def sanitize_meta_content(text):
+    if not text:
+        return text
+    sensitive_words = ["হত্যা", "খুন", "আত্মহত্যা", "ধর্ষণ", "রক্তাক্ত", "bomb", "kill", "suicide", "murder"]
+    for word in sensitive_words:
+        if len(word) > 2:
+            masked = word[0] + "*" * (len(word) - 2) + word[-1]
+        else:
+            masked = word[0] + "*"
+        text = re.sub(re.escape(word), masked, text, flags=re.IGNORECASE)
+    return text
+    
 def get_live_groq_models():
     if not groq_client:
         return []
@@ -302,14 +312,28 @@ def clean_and_maximize_image_url(url):
 
 def search_related_news_image(query):
     try:
-        clean_q = re.sub(r"[^\w\s]", " ", query)[:45].strip()
-        encoded = urllib.parse.quote(f"{clean_q} news bangladesh")
+        q_lower = query.lower()
+        # Contextual entity mapping for thematic/emblem fallbacks
+        if "বিশ্ববিদ্যালয়" in q_lower or "university" in q_lower:
+            search_term = f"{re.sub(r'[^\\w\\s]', ' ', query)[:25].strip()} university logo emblem bangladesh"
+        elif "স্বাস্থ্য" in q_lower or "ডেঙ্গু" in q_lower or "hospital" in q_lower:
+            search_term = "directorate general of health services bangladesh logo"
+        elif "জাতিসংঘ" in q_lower or "un" in q_lower or "general assembly" in q_lower:
+            search_term = "united nations flag logo emblem"
+        elif "খেলা" in q_lower or "cricket" in q_lower or "football" in q_lower:
+            search_term = "bangladesh cricket football sports stadium"
+        elif "আদালত" in q_lower or "হাইকোর্ট" in q_lower or "সুপ্রিম কোর্ট" in q_lower:
+            search_term = "supreme court of bangladesh building"
+        else:
+            search_term = f"{re.sub(r'[^\\w\\s]', ' ', query)[:35].strip()} news bangladesh"
+
+        encoded = urllib.parse.quote(search_term)
         url = f"https://html.duckduckgo.com/html/?q={encoded}"
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6)
         candidates = re.findall(r'//external-content\.duckduckgo\.com/iu/\?u=(https?://[^&"\']+)', resp.text)
         for cand in candidates:
             dec = urllib.parse.unquote(cand)
-            if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'logo' not in dec.lower() and 'icon' not in dec.lower():
+            if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')):
                 return dec
     except Exception:
         pass
@@ -742,9 +766,9 @@ def post_instagram_story(story_image_url):
         requests.post(pub_url, data={"creation_id": creation_id, "access_token": ACCESS_TOKEN})
 
 def publish_article(entry, source_name, img_url, curated):
-    headline = curated["headline"]
-    sub_headline = curated["sub_headline"]
-    summary = curated["summary"]
+    headline = sanitize_meta_content(curated["headline"])
+    sub_headline = sanitize_meta_content(curated["sub_headline"]) if curated.get("sub_headline") else ""
+    summary = sanitize_meta_content(curated["summary"])
 
     print(f"Publishing article: {headline}", flush=True)
 
@@ -773,18 +797,14 @@ def publish_article(entry, source_name, img_url, curated):
 
     post_facebook_comment(fb_photo_id, comment_text_fb)
 
-    # FACEBOOK STORY: Correctly upload local file path via CDN
+    # FACEBOOK STORY: Pass the local file path directly
     try:
-        temp_fb_story = requests.post(
-            f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
-            files={"source": open(fb_story_canvas_path, "rb")},
-            data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
-        ).json()
-        fb_story_cdn = get_fb_image_url(temp_fb_story.get("id"))
-        if fb_story_cdn:
-            post_facebook_story(fb_story_cdn)
+        post_facebook_story(fb_story_canvas_path)
     except Exception as err:
         print(f"FB Story error: {err}", flush=True)
+
+    # Safety buffer before touching Instagram API endpoints
+    time.sleep(15)
 
     if IG_USER_ID:
         try:
@@ -904,14 +924,19 @@ def main():
     used_sources = set()
     selected_posts = []
 
+    # Priority Sweep: Exhaustively gather up to 3 posts following Tier 1 -> Tier 2 -> Tier 3 strictly from unique sources
     pools = [(1, tier_1), (2, tier_2), (3, tier_3)]
     for tier_num, pool in pools:
         for c in pool:
+            if len(selected_posts) >= 3:
+                break
             if c["source_name"] not in used_sources and c["entry"].link not in state["posted_urls"]:
                 selected_posts.append(c)
                 used_sources.add(c["source_name"])
-                break
+        if len(selected_posts) >= 3:
+            break
 
+    # Guaranteed Quota Fallback: If lower than 3 posts, pull highest remaining scores from unused sources
     if len(selected_posts) < 3:
         all_remaining = sorted(candidates, key=lambda x: x["score"], reverse=True)
         for c in all_remaining:
@@ -928,8 +953,8 @@ def main():
             state["posted_urls"].append(c["entry"].link)
             save_state(state)
             published_count += 1
-            # Increased sleep buffer to 25 seconds between posts to prevent API rate-limiting limits
-            time.sleep(25)
+            # Extended inter-post spacing to prevent Instagram Media Publish velocity limits
+            time.sleep(45)
 
     print(f"Cycle completed. Articles published: {published_count}", flush=True)
 
