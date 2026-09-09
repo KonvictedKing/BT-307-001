@@ -20,55 +20,47 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 ALL_FEEDS = [
-    {"name": "Prothom Alo", "url": "https://www.prothomalo.com/feed"},
+    {"name": "Prothom Alo", "url": "https://www.prothomalo.com/feed/"},
     {"name": "The Daily Star", "url": "https://www.thedailystar.net/frontpage/rss.xml"},
-    {"name": "The Business Standard", "url": "https://www.tbsnews.net/rss.xml"},
-    {"name": "Samakal", "url": "https://www.samakal.com/feed"},
     {"name": "BBC Bangla", "url": "https://feeds.bbci.co.uk/bengali/rss.xml"},
-    {"name": "Kaler Kantho", "url": "https://www.kalerkantho.com/rss.xml"},
-    {"name": "Daily Ittefaq", "url": "https://www.ittefaq.com.bd/rss.xml"},
-    {"name": "Daily Jugantor", "url": "https://www.jugantor.com/feed"},
-    {"name": "Dhaka Tribune", "url": "https://www.dhakatribune.com/feed"},
-    {"name": "BDNews24", "url": "https://bangla.bdnews24.com/rss.xml"},
-    {"name": "Banglanews24", "url": "https://www.banglanews24.com/rss/rss.xml"},
-    {"name": "Jago News", "url": "https://www.jagonews24.com/rss/rss.xml"},
-    {"name": "Dhaka Post", "url": "https://www.dhakapost.com/rss.xml"},
-    {"name": "Kalbela", "url": "https://www.kalbela.com/feed"},
-    {"name": "Bangla Tribune", "url": "https://www.banglatribune.com/feed"},
-    {"name": "Risingbd", "url": "https://www.risingbd.com/rss/rss.xml"},
-    {"name": "Bangladesh Journal", "url": "https://www.bd-journal.com/feed/latest-r"},
-    {"name": "Daily Bangladesh", "url": "https://www.daily-bangladesh.com/rss/rss.xml"},
-    {"name": "Barta24", "url": "https://barta24.com/feed"},
-    {"name": "Dhaka Times", "url": "https://www.dhakatimes24.com/feed"},
-    {"name": "Bhorer Kagoj", "url": "https://www.bhorerkagoj.com/feed"},
-    {"name": "Inqilab", "url": "https://www.dailyinqilab.com/feed"},
-    {"name": "Manab Zamin", "url": "https://mzamin.com/rss.xml"},
+    {"name": "BDNews24", "url": "https://bdnews24.com/?widgetName=rssfeed&widgetId=1150&getXmlFeed=true"},
+    {"name": "The Business Standard", "url": "https://www.tbsnews.net/rss.xml"},
     {"name": "Amar Desh", "url": "https://www.amardesh.com/feed"},
-    {"name": "Sangbad", "url": "https://www.thesangbad.net/feed"},
-    {"name": "Bonik Barta", "url": "https://bonikbarta.net/feed"},
-    {"name": "Protidiner Bangladesh", "url": "https://www.protidinerbangladesh.com/feed"},
-    {"name": "Ajker Patrika", "url": "https://www.ajkerpatrika.com/feed"},
-    {"name": "Desh Rupantor", "url": "https://www.deshrupantor.com/feed"},
-    {"name": "Dhaka Patrika", "url": "https://dhakapatrika.com/feed"},
-    {"name": "Amader Shomoy", "url": "https://www.dainikamadershomoy.com/feed"},
-    {"name": "The Asian Age", "url": "https://dailyasianage.com/feed"},
-    {"name": "New Age", "url": "https://www.newagebd.net/rss"},
+    {"name": "Jago News", "url": "https://www.jagonews24.com/rss/rss.xml"},
+    {"name": "Samakal", "url": "https://samakal.com/rss.xml"},
+    {"name": "New Age", "url": "https://newagebd.net/rss"},
+    {"name": "Banglanews24", "url": "https://www.banglanews24.com/rss/rss.xml"},
+    {"name": "Kaler Kantho", "url": "https://www.kalerkantho.com/rss.xml"},
     {"name": "The Financial Express", "url": "https://thefinancialexpress.com.bd/feed"},
+    {"name": "Dhaka Post", "url": "https://dhakapost.com/rss.xml"},
+    {"name": "Daily Ittefaq", "url": "https://www.ittefaq.com.bd/rss.xml"},
+    {"name": "Sangbad", "url": "https://www.thesangbad.net/feed"},
+    {"name": "Daily Jugantor", "url": "https://www.jugantor.com/feed"},
+    {"name": "Bonik Barta", "url": "https://bonikbarta.net/feed"},
     {"name": "Bangladesh Post", "url": "https://bangladeshpost.net/rss.xml"},
-    {"name": "Independent Television", "url": "https://www.independent24.com/feed"},
-    {"name": "RTV Online", "url": "https://www.rtvonline.com/feed"},
-    {"name": "NTV Online", "url": "https://www.ntvbd.com/feed"},
-    {"name": "Channel i Online", "url": "https://www.channelionline.com/feed"},
-    {"name": "Ekattor TV", "url": "https://www.ekattor.tv/feed"},
-    {"name": "Sarabangla", "url": "https://sarabangla.net/feed"},
+    {"name": "Kalbela", "url": "https://www.kalbela.com/feed"},
     {"name": "BSS News", "url": "https://www.bssnews.net/feed"},
-    {"name": "Bangladesh Pratidin", "url": "https://www.bd-pratidin.com/feed"},
+    {"name": "Manab Zamin", "url": "https://mzamin.com/rss.xml"},
+    {"name": "Dhaka Tribune", "url": "https://www.dhakatribune.com/feed"},
+    {"name": "Bangla Tribune", "url": "https://www.banglatribune.com/feed"},
+    {"name": "Protidiner Bangladesh", "url": "https://www.protidinerbangladesh.com/feed"},
+    {"name": "The Asian Age", "url": "https://dailyasianage.com/feed"},
+    {"name": "Risingbd", "url": "https://www.risingbd.com/rss/rss.xml"},
+    {"name": "Ajker Patrika", "url": "https://www.ajkerpatrika.com/feed"},
+    {"name": "Daily Bangladesh", "url": "https://www.daily-bangladesh.com/rss/rss.xml"},
+    {"name": "Sarabangla", "url": "https://sarabangla.net/feed"},
+    {"name": "Barta24", "url": "https://barta24.com/feed"},
     {"name": "Daily Janakantha", "url": "https://www.janakantha.com/feed"},
-    {"name": "Ekushey TV", "url": "https://www.ekushey-tv.com/feed"},
-    {"name": "Sun News", "url": "https://www.sunnews24x7.com/rss"},
-    {"name": "BD24Live", "url": "https://bd24live.com/feed"}
+    {"name": "Bangladesh Pratidin", "url": "https://www.bd-pratidin.com/feed"},
+    {"name": "Dhaka Times", "url": "https://www.dhakatimes24.com/feed"},
+    {"name": "Desh Rupantor", "url": "https://www.deshrupantor.com/feed"},
+    {"name": "Bangladesh Journal", "url": "https://www.bd-journal.com/feed/latest-r"},
+    {"name": "Amader Shomoy", "url": "https://www.dainikamadershomoy.com/feed"},
+    {"name": "Bhorer Kagoj", "url": "https://www.bhorerkagoj.com/feed"},
+    {"name": "BD24Live", "url": "https://bd24live.com/feed"},
+    {"name": "Daily Inqilab", "url": "https://www.dailyinqilab.com/feed"},
+    {"name": "Sun News", "url": "https://www.sunnews24x7.com/rss"}
 ]
-
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -110,7 +102,20 @@ def pre_clean_text(text):
     cleaned = re.sub(r"<[^>]+>", "", text)
     cleaned = re.sub(r"\[.*?\]|\(.*?\)|\|.*$", "", cleaned)
     return cleaned.strip()
-
+    
+def is_within_last_12_hours(entry):
+    try:
+        if hasattr(entry, "published_parsed") and entry.published_parsed:
+            pub_timestamp = time.mktime(entry.published_parsed)
+        elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
+            pub_timestamp = time.mktime(entry.updated_parsed)
+        else:
+            return True
+        
+        return (time.time() - pub_timestamp) <= 43200
+    except Exception:
+        return True
+        
 def sanitize_meta_content(text):
     if not text:
         return text
@@ -856,9 +861,14 @@ def scan_feeds_smart(state):
     for feed in current_batch:
         try:
             parsed = feedparser.parse(feed["url"])
-            for entry in parsed.entries[:5]:
+            # Scans deeper (up to 15 entries) across the last 12 hours
+            for entry in parsed.entries[:15]:
                 if entry.link in state["posted_urls"]:
                     continue
+                
+                if not is_within_last_12_hours(entry):
+                    continue
+
                 clean_t = pre_clean_text(entry.title)
                 if len(clean_t.split()) < 3:
                     continue
@@ -866,7 +876,6 @@ def scan_feeds_smart(state):
                 curated = analyze_and_score_news(entry.title, entry.get("summary", ""), feed["name"])
                 if curated:
                     img_url = extract_high_res_image(entry)
-                    # Skip articles where no image could be retrieved
                     if not img_url:
                         continue
                     all_evaluated.append({
@@ -887,16 +896,19 @@ def scan_feeds_smart(state):
         for feed in ALL_FEEDS:
             try:
                 parsed = feedparser.parse(feed["url"])
-                for entry in parsed.entries[:3]:
+                for entry in parsed.entries[:10]:
                     if entry.link in state["posted_urls"]:
                         continue
+                    
+                    if not is_within_last_12_hours(entry):
+                        continue
+
                     clean_t = pre_clean_text(entry.title)
                     if len(clean_t.split()) < 3:
                         continue
                     curated = analyze_and_score_news(entry.title, entry.get("summary", ""), feed["name"])
                     if curated:
                         img_url = extract_high_res_image(entry)
-                        # Skip if no image was found so it doesn't post a blank card
                         if not img_url:
                             continue
                         all_evaluated.append({
