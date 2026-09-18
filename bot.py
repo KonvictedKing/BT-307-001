@@ -129,7 +129,21 @@ def is_within_last_12_hours(entry):
         return (time.time() - pub_timestamp) <= 43200
     except Exception:
         return True
-        
+def sanitize_bengali_symbols(text):
+    if not text:
+        return ""
+    # Replace em-dash, en-dash, figure dash, horizontal bar with standard hyphen
+    text = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE58\uFE63\uFF0D]", " - ", text)
+    # Replace curly single and double quotes with standard quotes
+    text = re.sub(r"[\u2018\u2019\u201A\u201B]", "'", text)
+    text = re.sub(r"[\u201C\u201D\u201E\u201F]", '"', text)
+    # Strip invisible zero-width spaces, soft hyphens, and byte-order marks
+    text = text.replace("\u200b", "").replace("\u00ad", "").replace("\ufeff", "").replace("\u00a0", " ")
+    # Normalize spaces around dashes and multiple spaces
+    text = re.sub(r"\s*-\s*", " - ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 def sanitize_meta_content(text):
     if not text:
         return text
@@ -326,6 +340,44 @@ def clean_and_maximize_image_url(url):
     url = re.sub(r'&+', '&', url)
     url = re.sub(r'[?&]$', '', url)
     return url
+    
+# Contextual keyword map to detect key entities from Bengali text
+ENTITY_CONTEXT_MAP = {
+    # Universities
+    "জগন্নাথ": "Jagannath University logo",
+    "ঢাকা বিশ্ববিদ্যালয়": "Dhaka University logo",
+    "ঢাবি": "Dhaka University logo",
+    "বুয়েট": "BUET logo",
+    "রাবি": "Rajshahi University logo",
+    "চবি": "Chittagong University logo",
+    "জাবি": "Jahangirnagar University logo",
+    # Organizations & Government
+    "জাতিসংঘ": "United Nations logo emblem",
+    "হাইকোর্ট": "Supreme Court of Bangladesh",
+    "সুপ্রিম কোর্ট": "Supreme Court of Bangladesh",
+    "নির্বাচন কমিশন": "Bangladesh Election Commission logo",
+    "ডিবি": "Detective Branch Bangladesh Police",
+    "র‍্যাব": "Rapid Action Battalion logo",
+    "পুলিশ": "Bangladesh Police logo",
+    # Health & Medical
+    "ডেঙ্গু": "Aedes mosquito dengue fever",
+    "করোনা": "Coronavirus medical health",
+    "স্বাস্থ্য অধিদপ্তর": "DGHS Bangladesh logo",
+    # Sports & Personalities
+    "মরিনিও": "Jose Mourinho football manager",
+    "রিয়াল মাদ্রিদ": "Real Madrid logo crest",
+    "বার্সেলোনা": "FC Barcelona logo crest",
+    "সাকিব": "Shakib Al Hasan cricket",
+    "তামিম": "Tamim Iqbal cricket",
+    "বিসিবি": "Bangladesh Cricket Board logo"
+}
+
+def detect_context_query(headline, summary=""):
+    combined = f"{headline} {summary}"
+    for key, search_term in ENTITY_CONTEXT_MAP.items():
+        if key in combined:
+            return search_term
+    return None
 
 def search_related_news_image(query):
     try:
@@ -466,6 +518,15 @@ def download_image_robust(url, fallback_query=""):
     if img:
         return img
 
+    # 1. Try smart contextual entity detection first (logos, personalities, institutions)
+    smart_query = detect_context_query(fallback_query)
+    if smart_query:
+        smart_url = search_related_news_image(smart_query)
+        img = try_fetch(smart_url)
+        if img:
+            return img
+
+    # 2. General news image fallback
     fallback_url = search_related_news_image(fallback_query or "Bangladesh news")
     img = try_fetch(fallback_url)
     if img:
@@ -734,13 +795,18 @@ def post_facebook_story(image_path):
     payload = {"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN}
     try:
         with open(image_path, "rb") as f:
-            res = requests.post(url, files={"source": f}, data=payload, timeout=20).json()
+            res = requests.post(url, files={"source": f}, data=payload, timeout=25).json()
         photo_id = res.get("id")
         if photo_id:
             story_url = f"https://graph.facebook.com/v20.0/{PAGE_ID}/photo_stories"
-            requests.post(story_url, data={"photo_id": photo_id, "access_token": ACCESS_TOKEN}, timeout=20)
+            s_res = requests.post(story_url, data={"photo_id": photo_id, "access_token": ACCESS_TOKEN}, timeout=25).json()
+            print("FB Story publish response:", s_res, flush=True)
+            return s_res
+        else:
+            print(f"FB Story temp upload failed: {res}", flush=True)
     except Exception as err:
         print(f"FB Story error: {err}", flush=True)
+    return None
 
 def wait_for_ig_container(creation_id):
     status_url = f"https://graph.facebook.com/v20.0/{creation_id}?fields=status_code&access_token={ACCESS_TOKEN}"
@@ -786,9 +852,13 @@ def post_instagram_story(story_image_url):
         requests.post(pub_url, data={"creation_id": creation_id, "access_token": ACCESS_TOKEN})
 
 def publish_article(entry, source_name, img_url, curated):
-    headline = sanitize_meta_content(curated["headline"])
-    sub_headline = sanitize_meta_content(curated["sub_headline"]) if curated.get("sub_headline") else ""
-    summary = sanitize_meta_content(curated["summary"])
+    raw_hl = sanitize_bengali_symbols(curated["headline"])
+    raw_sub = sanitize_bengali_symbols(curated.get("sub_headline", ""))
+    raw_sum = sanitize_bengali_symbols(curated["summary"])
+
+    headline = sanitize_meta_content(raw_hl)
+    sub_headline = sanitize_meta_content(raw_sub) if raw_sub else ""
+    summary = sanitize_meta_content(raw_sum)
 
     print(f"Publishing article: {headline}", flush=True)
 
@@ -820,8 +890,8 @@ def publish_article(entry, source_name, img_url, curated):
     except Exception as err:
         print(f"FB Story error: {err}", flush=True)
 
-    # Safety buffer before touching Instagram API endpoints
-    time.sleep(15)
+    # Buffer between Facebook and Instagram actions
+    time.sleep(20)
 
     if IG_USER_ID:
         try:
@@ -830,7 +900,7 @@ def publish_article(entry, source_name, img_url, curated):
                     f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
                     files={"source": f_ig},
                     data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN},
-                    timeout=20
+                    timeout=25
                 ).json()
             ig_cdn_url = get_fb_image_url(temp_res.get("id"))
 
@@ -838,12 +908,15 @@ def publish_article(entry, source_name, img_url, curated):
                 ig_caption = f"{headline}\n\nসূত্র: {source_name}\n\n#bongotribune #banglanews #bangladesh #news"
                 post_instagram_feed(ig_cdn_url, ig_caption)
 
+            # Delay to satisfy Instagram's story publish velocity quota
+            time.sleep(15)
+
             with open(ig_story_path, "rb") as f_story:
                 story_res = requests.post(
                     f"https://graph.facebook.com/v20.0/{PAGE_ID}/photos",
                     files={"source": f_story},
                     data={"published": "false", "temporary": "true", "access_token": ACCESS_TOKEN},
-                    timeout=20
+                    timeout=25
                 ).json()
             story_cdn = get_fb_image_url(story_res.get("id"))
 
@@ -855,24 +928,10 @@ def publish_article(entry, source_name, img_url, curated):
     return True
 
 def scan_feeds_smart(state):
-    print(f"Smart-scanning feeds with Rotational Queue & Editorial Tiers...", flush=True)
+    print("Full-spectrum scan: sweeping all 54 news portals for latest updates...", flush=True)
     all_evaluated = []
 
-    total_feeds = len(ALL_FEEDS)
-    batch_size = 20
-    start_idx = state.get("feed_rotation_index", 0) % total_feeds
-    
-    current_batch = []
-    for i in range(batch_size):
-        feed_idx = (start_idx + i) % total_feeds
-        current_batch.append(ALL_FEEDS[feed_idx])
-
-    state["feed_rotation_index"] = (start_idx + batch_size) % total_feeds
-    save_state(state)
-
-    print(f"Scanning batch of {len(current_batch)} portals for this cycle...", flush=True)
-
-    for feed in current_batch:
+    for feed in ALL_FEEDS:
         try:
             parsed = feedparser.parse(feed["url"])
             # Scans deeper (up to 15 entries) across the last 12 hours
