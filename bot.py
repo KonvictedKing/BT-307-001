@@ -2,9 +2,13 @@ import os
 import re
 import json
 import time
+import socket
 import urllib.parse
 from datetime import datetime
 from io import BytesIO
+
+# Prevent slow or unresponsive RSS servers from hanging the GitHub runner
+socket.setdefaulttimeout(8)
 
 import feedparser
 import requests
@@ -161,7 +165,7 @@ def get_live_groq_models():
         return []
     try:
         available = [m.id for m in groq_client.models.list().data if "whisper" not in m.id.lower() and "guard" not in m.id.lower()]
-        priority = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3.6-27b", "openai/gpt-oss-20b"]
+        priority = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
         sorted_models = [m for m in priority if m in available] + [m for m in available if m not in priority]
         return sorted_models
     except Exception as e:
@@ -199,7 +203,7 @@ def query_llm_dual_engine(prompt):
                 print(f"Groq {model} error: {ge}", flush=True)
 
     if gemini_client:
-        for model in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]:
+        for model in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
             try:
                 res = gemini_client.models.generate_content(
                     model=model,
@@ -383,20 +387,32 @@ def detect_context_query(headline, summary=""):
 def search_related_news_image(query):
     try:
         clean_text = re.sub(r'[^\w\s]', ' ', query).strip()
-        search_kw = clean_text[:30].strip()
+        search_kw = clean_text[:40].strip()
+
+        # Only append "Bangladesh" if not already present or not an international entity
+        if "bangladesh" not in search_kw.lower() and not any(k in search_kw.lower() for k in ["united nations", "madrid", "barcelona", "mourinho"]):
+            ddg_query = f"{search_kw} Bangladesh"
+        else:
+            ddg_query = search_kw
 
         # Engine 1: DuckDuckGo HTML
-        encoded = urllib.parse.quote(f"{search_kw} Bangladesh")
+        encoded = urllib.parse.quote(ddg_query)
         url = f"https://html.duckduckgo.com/html/?q={encoded}"
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6)
         candidates = re.findall(r'//external-content\.duckduckgo\.com/iu/\?u=(https?://[^&"\']+)', resp.text)
+        
+        # If user searched for a logo, allow 'logo' in the file name!
+        is_logo_search = "logo" in search_kw.lower() or "emblem" in search_kw.lower()
+        blocked_words = ['icon', 'pixel'] if is_logo_search else ['logo', 'icon', 'pixel']
+
         for cand in candidates:
             dec = urllib.parse.unquote(cand)
-            if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')) and not any(x in dec.lower() for x in ['logo', 'icon', 'pixel']):
+            if dec.endswith(('.jpg', '.jpeg', '.png', '.webp')) and not any(x in dec.lower() for x in blocked_words):
                 return dec
 
-        # Engine 2: Wikimedia Commons API (Highly reliable from cloud IPs)
-        wiki_url = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={urllib.parse.quote('Bangladesh ' + search_kw[:15])}&gsrlimit=3&prop=imageinfo&iiprop=url&format=json"
+        # Engine 2: Wikimedia Commons API
+        wiki_search = search_kw if is_logo_search else f"Bangladesh {search_kw[:20]}"
+        wiki_url = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={urllib.parse.quote(wiki_search)}&gsrlimit=3&prop=imageinfo&iiprop=url&format=json"
         w_res = requests.get(wiki_url, headers=BROWSER_HEADERS, timeout=5).json()
         pages = w_res.get("query", {}).get("pages", {})
         for p_id, p_info in pages.items():
@@ -827,6 +843,11 @@ def post_instagram_feed(image_url, caption):
     create_url = f"https://graph.facebook.com/v20.0/{IG_USER_ID}/media"
     payload = {"image_url": image_url, "caption": caption, "access_token": ACCESS_TOKEN}
     res = requests.post(create_url, data=payload).json()
+
+    if "error" in res:
+        print(f"IG Feed create blocked: {res['error'].get('message')} (subcode: {res['error'].get('error_subcode')})", flush=True)
+        return None
+
     creation_id = res.get("id")
     if not creation_id:
         print(f"IG container create error: {res}", flush=True)
@@ -906,7 +927,7 @@ def publish_article(entry, source_name, img_url, curated):
             ig_cdn_url = get_fb_image_url(temp_res.get("id"))
 
             if ig_cdn_url:
-                ig_caption = f"{headline}\n\nসূত্র: {source_name}\n\n#bongotribune #banglanews #bangladesh #news"
+                ig_caption = f"{headline}\n\nসূত্র: {source_name}"
                 post_instagram_feed(ig_cdn_url, ig_caption)
 
             # Delay to satisfy Instagram's story publish velocity quota
@@ -929,17 +950,29 @@ def publish_article(entry, source_name, img_url, curated):
     return True
 
 def scan_feeds_smart(state):
-    print("Full-spectrum scan: sweeping feeds for latest updates...", flush=True)
+    print("Full-spectrum rotational scan: sweeping feeds for latest updates...", flush=True)
     all_evaluated = []
 
-    for feed in ALL_FEEDS:
+    total_feeds = len(ALL_FEEDS)
+    start_index = state.get("feed_rotation_index", 0) % total_feeds
+    rotated_feeds = ALL_FEEDS[start_index:] + ALL_FEEDS[:start_index]
+
+    feeds_scanned = 0
+    max_feeds_per_run = 18
+
+    for feed in rotated_feeds:
+        if feeds_scanned >= max_feeds_per_run:
+            print(f"Reached batch limit of {max_feeds_per_run} feeds. Proceeding.", flush=True)
+            break
+        feeds_scanned += 1
+
         try:
             parsed = feedparser.parse(feed["url"])
             # Take only the top 3 freshest entries per feed to preserve LLM rate limits
             for entry in parsed.entries[:3]:
                 if entry.link in state["posted_urls"]:
                     continue
-                
+
                 if not is_within_last_12_hours(entry):
                     continue
 
@@ -951,7 +984,11 @@ def scan_feeds_smart(state):
                 if curated:
                     img_url = extract_high_res_image(entry)
                     if not img_url:
-                        continue
+                        # Allow it to proceed if an entity logo/crest exists in ENTITY_CONTEXT_MAP
+                        if not detect_context_query(curated["headline"], curated.get("summary", "")):
+                            continue
+                        img_url = ""
+
                     all_evaluated.append({
                         "entry": entry,
                         "source_name": feed["name"],
@@ -961,18 +998,21 @@ def scan_feeds_smart(state):
                         "score": curated["score"]
                     })
                     print(f"Evaluated: [{feed['name']}] [Tier {curated['tier']}] {curated['headline']} | Score: {curated['score']}", flush=True)
-                
+
                 time.sleep(0.5)
 
                 # Stop scanning once we have collected a strong candidate pool (12 articles)
-                # This guarantees 3 high-priority posts while preventing API rate limits and timeouts
                 tier_1_count = sum(1 for c in all_evaluated if c["tier"] == 1)
                 if len(all_evaluated) >= 12 and tier_1_count >= 2:
                     print(f"Collected sufficient candidates ({len(all_evaluated)} stories with {tier_1_count} Tier-1s). Proceeding to selection.", flush=True)
+                    state["feed_rotation_index"] = (start_index + feeds_scanned) % total_feeds
+                    save_state(state)
                     return all_evaluated
         except Exception:
             continue
 
+    state["feed_rotation_index"] = (start_index + feeds_scanned) % total_feeds
+    save_state(state)
     return all_evaluated
 
 def main():
