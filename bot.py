@@ -148,6 +148,21 @@ def sanitize_bengali_symbols(text):
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
+def is_duplicate_story(candidate_title, candidate_summary, evaluated_list):
+    """Prevents two newspapers from covering the exact same event in the same run."""
+    c_text = f"{candidate_title} {candidate_summary}".lower()
+    c_words = set(re.findall(r'[\u0980-\u09FF\w]{4,}', c_text))
+    if not c_words:
+        return False
+
+    for item in evaluated_list:
+        e_text = f"{item['entry'].title} {item['entry'].get('summary', '')}".lower()
+        e_words = set(re.findall(r'[\u0980-\u09FF\w]{4,}', e_text))
+        intersection = c_words.intersection(e_words)
+        if len(intersection) / max(len(c_words), 1) > 0.55:
+            return True
+    return False
+
 def sanitize_meta_content(text):
     if not text:
         return text
@@ -164,13 +179,18 @@ def get_live_groq_models():
     if not groq_client:
         return []
     try:
-        available = [m.id for m in groq_client.models.list().data if "whisper" not in m.id.lower() and "guard" not in m.id.lower()]
+        # Filter strictly for chat models (llama/qwen) and exclude specialized or gated models
+        available = [
+            m.id for m in groq_client.models.list().data 
+            if any(k in m.id.lower() for k in ["llama", "qwen"]) 
+            and not any(bad in m.id.lower() for bad in ["whisper", "guard", "audio", "orpheus", "canopylabs"])
+        ]
         priority = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
         sorted_models = [m for m in priority if m in available] + [m for m in available if m not in priority]
-        return sorted_models
+        return sorted_models if sorted_models else ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     except Exception as e:
         print(f"Could not list Groq models: {e}", flush=True)
-        return []
+        return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
 ACTIVE_GROQ_MODELS = get_live_groq_models()
 
@@ -181,160 +201,138 @@ def is_mostly_english(text):
     bng_chars = len(re.findall(r'[\u0980-\u09FF]', text))
     return eng_chars > bng_chars
 
-def query_llm_dual_engine(prompt):
-    if groq_client and ACTIVE_GROQ_MODELS:
-        for model in ACTIVE_GROQ_MODELS[:2]:
-            try:
-                res = groq_client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "You are the Senior Bangla News Editor of Bongo Tribune. You write 100% in fluent, professional, journalistic Bengali (বাংলা). Never output English or internal thoughts. Strict Bangladesh focus."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    model=model,
-                    temperature=0.1,
-                    max_tokens=350,
-                )
-                raw_text = res.choices[0].message.content
-                clean = re.sub(r"<think>[\s\S]*?</think>", "", raw_text, flags=re.IGNORECASE)
-                clean = re.sub(r"<think>[\s\S]*", "", clean, flags=re.IGNORECASE).strip()
-                if len(clean) > 20:
-                    return clean
-            except Exception as ge:
-                print(f"Groq {model} error: {ge}", flush=True)
+def is_duplicate_story(candidate_title, candidate_summary, evaluated_list):
+    """Prevents two newspapers from covering the exact same event in the same run."""
+    c_text = f"{candidate_title} {candidate_summary}".lower()
+    c_words = set(re.findall(r'[\u0980-\u09FF\w]{4,}', c_text))
+    if not c_words:
+        return False
 
-    if gemini_client:
-        for model in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
-            try:
-                res = gemini_client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                )
-                if res and getattr(res, "text", None):
-                    clean = re.sub(r"<think>[\s\S]*?</think>", "", res.text, flags=re.IGNORECASE).strip()
-                    if len(clean) > 20:
-                        return clean
-            except Exception as ge:
-                print(f"Gemini {model} fallback error: {ge}", flush=True)
-                continue
-    return None
+    for item in evaluated_list:
+        e_text = f"{item['entry'].title} {item['entry'].get('summary', '')}".lower()
+        e_words = set(re.findall(r'[\u0980-\u09FF\w]{4,}', e_text))
+        intersection = c_words.intersection(e_words)
+        if len(intersection) / max(len(c_words), 1) > 0.55:
+            return True
+    return False
 
-def force_translate_to_bangla(text):
-    if not text or not is_mostly_english(text):
-        return text
-    prompt = f"Translate the following news text strictly into formal journalistic Bengali (Bangladesh focus). Do NOT add notes or English:\n\n{text}"
-    translated = query_llm_dual_engine(prompt)
-    if translated and not is_mostly_english(translated):
-        return re.sub(r"[*#_`]", "", translated).strip(' "')
-    return text
-
-def analyze_and_score_news(raw_title, raw_summary, source_name):
+def triage_with_groq_fast(raw_title, raw_summary, source_name):
+    """Stage 1: Ultra-fast evaluation consuming ~15 tokens via Groq 8B."""
     clean_t = pre_clean_text(raw_title)
-    clean_s = pre_clean_text(raw_summary) if raw_summary else clean_t
+    clean_s = pre_clean_text(raw_summary)[:200] if raw_summary else clean_t
+
+    prompt = f"""News Source: {source_name}
+Title: {clean_t}
+Summary: {clean_s}
+
+Analyze this Bangladesh news story.
+Tiers:
+1 = Urgent/Breaking, Major Crime, High Court, Crucial National Policy
+2 = Economy, Governance, Standard National News
+3 = Culture, Lifestyle, Sports
+
+Respond strictly in this format:
+TIER: <1, 2, or 3>
+SCORE: <1-10>"""
+
+    if groq_client:
+        try:
+            res = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=20,
+            )
+            text = res.choices[0].message.content.strip()
+            tier_m = re.search(r"TIER:\s*([123])", text, re.I)
+            score_m = re.search(r"SCORE:\s*(\d+)", text, re.I)
+            tier = int(tier_m.group(1)) if tier_m else 2
+            score = int(score_m.group(1)) if score_m else 6
+            return tier, score
+        except Exception as e:
+            print(f"Groq triage error: {e}", flush=True)
+
+    return 2, 6
+
+def write_card_content_with_gemini(raw_title, raw_summary, source_name, tier, score):
+    """Stage 2: High-impact editorial Bengali generation via Gemini (only 3 calls per run)."""
+    clean_t = pre_clean_text(raw_title)
+    clean_s = pre_clean_text(raw_summary)[:400] if raw_summary else clean_t
 
     prompt = f"""News Source: {source_name}
 Title: {clean_t}
 Summary: {clean_s}
 
 You are the Chief News Editor of Bongo Tribune.
-Select this nationwide Bangladesh story (politics, economy, crime, social debate, sports, national life) and classify its editorial priority tier:
-- Tier 1: Alert Triggers (Breaking, urgent crime, major court rulings, critical national policy, severe incidents)
-- Tier 2: Standard Desk (Economy, governance, public affairs, standard national news)
-- Tier 3: Soft News (Culture, features, lifestyle, general sports)
+Write a formal, high-impact Bengali news report for social media cards.
 
 CRITICAL RULES:
-1. Output MUST be 100% in fluent journalistic BENGALI (বাংলা). Zero English characters. Translate all English news into high-impact Bengali.
-2. Provide a 3 to 4 complete sentence Bengali summary (45 to 60 words). Never cut off mid-sentence.
-3. Output format must use these exact delimiters:
+1. 100% journalistic BENGALI (বাংলা). Zero English characters.
+2. Provide a 3 to 4 complete sentence Bengali summary (45 to 60 words).
+3. Output exact delimiters:
 
-###TIER###
-<1 or 2 or 3>
 ###HEADLINE###
 <বাংলায় আকর্ষণীয় শিরোনাম>
 ###SUBHEADLINE###
 <বাংলায় উপ-শিরোনাম অথবা None>
 ###SUMMARY###
-<বাংলায় ৩-৪ বাক্যের বিস্তারিত প্রতিবেদন>
-###SCORE###
-<1-10>"""
+<বাংলায় ৩-৪ বাক্যের বিস্তারিত প্রতিবেদন>"""
 
-    response_text = query_llm_dual_engine(prompt)
-    if not response_text:
-        return None
+    if gemini_client:
+        for model in ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"]:
+            try:
+                res = gemini_client.models.generate_content(model=model, contents=prompt)
+                if res and getattr(res, "text", None):
+                    return parse_editorial_response(res.text, clean_t, clean_s, tier, score)
+            except Exception as ge:
+                print(f"Gemini error ({model}): {ge}", flush=True)
 
-    try:
-        clean_resp = re.sub(r"<think>[\s\S]*?</think>", "", response_text, flags=re.IGNORECASE)
-        clean_resp = re.sub(r"<think>[\s\S]*", "", clean_resp, flags=re.IGNORECASE).strip()
+    if groq_client:
+        try:
+            res = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are the Senior Bangla News Editor of Bongo Tribune. Write 100% in fluent journalistic Bengali."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=350,
+            )
+            return parse_editorial_response(res.choices[0].message.content, clean_t, clean_s, tier, score)
+        except Exception as ge:
+            print(f"Groq fallback error: {ge}", flush=True)
 
-        tier = 2
-        headline = ""
-        sub_headline = ""
-        summary = ""
-        score = 7
+    return {
+        "tier": tier,
+        "headline": clean_t,
+        "sub_headline": "",
+        "summary": clean_s[:250],
+        "score": score
+    }
 
-        tier_m = re.search(r"###TIER###\s*([123])", clean_resp)
-        if tier_m:
-            tier = int(tier_m.group(1))
+def parse_editorial_response(resp_text, fallback_t, fallback_s, tier, score):
+    clean_resp = re.sub(r"<think>[\s\S]*?</think>", "", resp_text, flags=re.IGNORECASE).strip()
 
-        hl_m = re.search(r"###HEADLINE###\s*\n?([^\n#]+)", clean_resp)
-        if hl_m:
-            headline = hl_m.group(1).strip(' \n"')
+    hl_m = re.search(r"###HEADLINE###\s*\n?([^\n#]+)", clean_resp)
+    headline = hl_m.group(1).strip(' \n"') if hl_m else fallback_t
 
-        sub_m = re.search(r"###SUBHEADLINE###\s*([\s\S]*?)(?=###SUMMARY###|$)", clean_resp)
-        if sub_m:
-            sub = sub_m.group(1).strip(' \n"')
-            if sub.lower() not in ["none", "null", "নেই"] and len(sub) > 3:
-                sub_headline = sub
+    sub_m = re.search(r"###SUBHEADLINE###\s*([\s\S]*?)(?=###SUMMARY###|$)", clean_resp)
+    sub_headline = ""
+    if sub_m:
+        sub = sub_m.group(1).strip(' \n"')
+        if sub.lower() not in ["none", "null", "নেই"] and len(sub) > 3:
+            sub_headline = sub
 
-        sum_m = re.search(r"###SUMMARY###\s*([\s\S]*?)(?=###SCORE###|$)", clean_resp)
-        if sum_m:
-            summary = sum_m.group(1).strip(' \n"')
+    sum_m = re.search(r"###SUMMARY###\s*([\s\S]*?)$", clean_resp)
+    summary = sum_m.group(1).strip(' \n"') if sum_m else fallback_s[:250]
 
-        score_m = re.search(r"###SCORE###\s*(\d+)", clean_resp)
-        if score_m:
-            score = int(score_m.group(1))
-
-        if not headline or not summary:
-            for line in clean_resp.split("\n"):
-                line = line.strip()
-                if not headline and len(line) > 5 and not line.startswith("#"):
-                    headline = line
-                elif not summary and len(line) > 20 and line != headline:
-                    summary = line
-
-        headline = re.sub(r"(?:IS_?POLITICS|ENGAGEMENT|SCORE|###)[\s\S]*", "", headline, flags=re.IGNORECASE).strip()
-        summary = re.sub(r"(?:IS_?POLITICS|ENGAGEMENT|SCORE|###)[\s\S]*", "", summary, flags=re.IGNORECASE).strip()
-
-        if is_mostly_english(headline):
-            headline = force_translate_to_bangla(headline)
-        if sub_headline and is_mostly_english(sub_headline):
-            sub_headline = force_translate_to_bangla(sub_headline)
-        if is_mostly_english(summary):
-            summary = force_translate_to_bangla(summary)
-
-        summary = summary.strip()
-        if summary and not summary.endswith(('।', '.', '!', '?')):
-            last_punc = max(summary.rfind('।'), summary.rfind('.'))
-            if last_punc > 20:
-                summary = summary[:last_punc + 1]
-            else:
-                summary += '।'
-
-        # Ensure headline is at least 3 distinct words; otherwise restore full clean title
-        if not headline or len(headline.split()) < 3:
-            headline = force_translate_to_bangla(clean_t)
-        if not summary or len(summary.split()) < 5:
-            summary = force_translate_to_bangla(clean_s[:250])
-
-        return {
-            "tier": tier,
-            "headline": headline,
-            "sub_headline": sub_headline,
-            "summary": summary,
-            "score": score
-        }
-    except Exception as e:
-        print(f"Extraction error: {e}", flush=True)
-        return None
+    return {
+        "tier": tier,
+        "headline": headline,
+        "sub_headline": sub_headline,
+        "summary": summary,
+        "score": score
+    }
 
 def clean_and_maximize_image_url(url):
     if not url:
@@ -980,39 +978,38 @@ def scan_feeds_smart(state):
                 if len(clean_t.split()) < 3:
                     continue
 
-                curated = analyze_and_score_news(entry.title, entry.get("summary", ""), feed["name"])
-                if curated:
-                    img_url = extract_high_res_image(entry)
-                    if not img_url:
-                        # Allow it to proceed if an entity logo/crest exists in ENTITY_CONTEXT_MAP
-                        if not detect_context_query(curated["headline"], curated.get("summary", "")):
-                            continue
-                        img_url = ""
+                # Cross-portal deduplication: skip if another newspaper already covered this event
+                if is_duplicate_story(clean_t, entry.get("summary", ""), all_evaluated):
+                    continue
 
-                    all_evaluated.append({
-                        "entry": entry,
-                        "source_name": feed["name"],
-                        "img_url": img_url,
-                        "curated": curated,
-                        "tier": curated["tier"],
-                        "score": curated["score"]
-                    })
-                    print(f"Evaluated: [{feed['name']}] [Tier {curated['tier']}] {curated['headline']} | Score: {curated['score']}", flush=True)
+                # Stage 1: Ultra-fast evaluation via Groq (~15 tokens)
+                tier, score = triage_with_groq_fast(entry.title, entry.get("summary", ""), feed["name"])
 
-                time.sleep(0.5)
+                img_url = extract_high_res_image(entry)
+                if not img_url:
+                    if not detect_context_query(clean_t, entry.get("summary", "")):
+                        continue
+                    img_url = ""
+
+                all_evaluated.append({
+                    "entry": entry,
+                    "source_name": feed["name"],
+                    "img_url": img_url,
+                    "tier": tier,
+                    "score": score
+                })
+                print(f"Triaged: [{feed['name']}] [Tier {tier}] {clean_t[:45]} | Score: {score}", flush=True)
+
+                time.sleep(1)
 
                 # Stop scanning once we have collected a strong candidate pool (12 articles)
                 tier_1_count = sum(1 for c in all_evaluated if c["tier"] == 1)
                 if len(all_evaluated) >= 12 and tier_1_count >= 2:
                     print(f"Collected sufficient candidates ({len(all_evaluated)} stories with {tier_1_count} Tier-1s). Proceeding to selection.", flush=True)
-                    state["feed_rotation_index"] = (start_index + feeds_scanned) % total_feeds
-                    save_state(state)
                     return all_evaluated
         except Exception:
             continue
 
-    state["feed_rotation_index"] = (start_index + feeds_scanned) % total_feeds
-    save_state(state)
     return all_evaluated
 
 def main():
@@ -1069,11 +1066,20 @@ def main():
     print(f"Publishing {len(selected_posts)} unique stories across distinct sources...", flush=True)
 
     for c in selected_posts:
-        if publish_article(c["entry"], c["source_name"], c["img_url"], c["curated"]):
+        # Stage 2: Gemini writes high-impact editorial Bangla copy ONLY for the 3 winners
+        curated = write_card_content_with_gemini(
+            c["entry"].title,
+            c["entry"].get("summary", ""),
+            c["source_name"],
+            c["tier"],
+            c["score"]
+        )
+
+        if publish_article(c["entry"], c["source_name"], c["img_url"], curated):
             state["posted_urls"].append(c["entry"].link)
             save_state(state)
             published_count += 1
-            # Extended inter-post spacing to prevent Instagram Media Publish velocity limits
+            # Extended cooldown to protect Instagram API limits
             time.sleep(45)
 
     print(f"Cycle completed. Articles published: {published_count}", flush=True)
