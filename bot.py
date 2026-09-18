@@ -199,18 +199,19 @@ def query_llm_dual_engine(prompt):
                 print(f"Groq {model} error: {ge}", flush=True)
 
     if gemini_client:
-        for model in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+        for model in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]:
             try:
                 res = gemini_client.models.generate_content(
                     model=model,
                     contents=prompt,
                 )
-                if res and res.text:
+                if res and getattr(res, "text", None):
                     clean = re.sub(r"<think>[\s\S]*?</think>", "", res.text, flags=re.IGNORECASE).strip()
                     if len(clean) > 20:
                         return clean
-            except Exception:
-                break
+            except Exception as ge:
+                print(f"Gemini {model} fallback error: {ge}", flush=True)
+                continue
     return None
 
 def force_translate_to_bangla(text):
@@ -928,14 +929,14 @@ def publish_article(entry, source_name, img_url, curated):
     return True
 
 def scan_feeds_smart(state):
-    print("Full-spectrum scan: sweeping all 54 news portals for latest updates...", flush=True)
+    print("Full-spectrum scan: sweeping feeds for latest updates...", flush=True)
     all_evaluated = []
 
     for feed in ALL_FEEDS:
         try:
             parsed = feedparser.parse(feed["url"])
-            # Scans deeper (up to 15 entries) across the last 12 hours
-            for entry in parsed.entries[:15]:
+            # Take only the top 3 freshest entries per feed to preserve LLM rate limits
+            for entry in parsed.entries[:3]:
                 if entry.link in state["posted_urls"]:
                     continue
                 
@@ -960,40 +961,17 @@ def scan_feeds_smart(state):
                         "score": curated["score"]
                     })
                     print(f"Evaluated: [{feed['name']}] [Tier {curated['tier']}] {curated['headline']} | Score: {curated['score']}", flush=True)
+                
                 time.sleep(0.5)
+
+                # Stop scanning once we have collected a strong candidate pool (12 articles)
+                # This guarantees 3 high-priority posts while preventing API rate limits and timeouts
+                tier_1_count = sum(1 for c in all_evaluated if c["tier"] == 1)
+                if len(all_evaluated) >= 12 and tier_1_count >= 2:
+                    print(f"Collected sufficient candidates ({len(all_evaluated)} stories with {tier_1_count} Tier-1s). Proceeding to selection.", flush=True)
+                    return all_evaluated
         except Exception:
             continue
-
-    if not all_evaluated:
-        print("Batch yielded no unposted news. Scanning all feeds as fallback...", flush=True)
-        for feed in ALL_FEEDS:
-            try:
-                parsed = feedparser.parse(feed["url"])
-                for entry in parsed.entries[:10]:
-                    if entry.link in state["posted_urls"]:
-                        continue
-                    
-                    if not is_within_last_12_hours(entry):
-                        continue
-
-                    clean_t = pre_clean_text(entry.title)
-                    if len(clean_t.split()) < 3:
-                        continue
-                    curated = analyze_and_score_news(entry.title, entry.get("summary", ""), feed["name"])
-                    if curated:
-                        img_url = extract_high_res_image(entry)
-                        if not img_url:
-                            continue
-                        all_evaluated.append({
-                            "entry": entry,
-                            "source_name": feed["name"],
-                            "img_url": img_url,
-                            "curated": curated,
-                            "tier": curated["tier"],
-                            "score": curated["score"]
-                        })
-            except Exception:
-                continue
 
     return all_evaluated
 
